@@ -2,9 +2,9 @@ I want to make a Telethon based MaiBot Adapter.
 Telethon (https://codeberg.org/Lonami/Telethon) is an asyncio Python 3 MTProto library. MaiBot (https://github.com/Mai-with-u/MaiBot), aka MaiSaka, is an LLM-based intelligent agent framework.
 It will be an enhanced version of https://github.com/exynos967/MaiBot-Telegram-Adapter, which includes a hand-written HTTP Telegram bot API library.
 
-1. Plugin Type: Register the plugin as an `adapter` (instead of `general`) if supported
+1. Plugin Type: Register the plugin as an `adapter` (instead of `general`) if supported.
 2. Telethon Version Compatibility (v1 & v2): Telethon is transitioning to v2 (https://docs.telethon.dev/en/v2/developing/migration-guide.html), the adapter should support both Telethon v1 and v2.
-3. Declare the third-party dependencies  within the plugin manifest/requirements.
+3. Declare the third-party dependencies within the plugin manifest/requirements.
 
 4. The adapter should, if supported or by design of MaiBot plugin, declare its supported capabilities to the MaiBot core.
   4.1 Allow the core (or other modules) to invoke unexposed Telethon or even raw MTProto APIs through the adapter, at users' own risk. Maybe make such a switch.
@@ -12,9 +12,9 @@ It will be an enhanced version of https://github.com/exynos967/MaiBot-Telegram-A
 5. Auto-Reconnection: The original adapter does not support this. Telethon does support reconnection by default.
 
 6. Support both standard Telegram Bot accounts (via Bot Token) and Userbot accounts (via MTProto session).
-6.1 For user login, support pre-configured Two-Factor Authentication (Password) via Telethon. If 2FA is required during login but no password was provided, fail with an error.
-6.2 For user login, devise a simple mechanism (interactive?) (e.g., via starting a temporary webpage accepting input, or other more elegant way) to input the one-time Telegram login code during login.
-6.3 Save session to MaiBot data path by defining Telethon client object data / session path (first parameter).
+  6.1 For user login, support pre-configured Two-Factor Authentication (Password) via Telethon. If 2FA is required during login but no password was provided, fail with an error.
+  6.2 For user login, devise a simple mechanism (interactive?) (e.g., via starting a temporary webpage accepting input, or other more elegant way) to input the one-time Telegram login code during login.
+  6.3 Save session to MaiBot data path by defining Telethon client object data / session path (first parameter).
 
 7. Capture message edit events (if supported by the account/bot type). After an edit occurs, buffer for `n` seconds before pushing to the core to prevent thrashing from rapid, consecutive edits.
 8. Silence Window: When an event is ready to be sent to the core, wait for a quiet window of `n` seconds without new incoming messages or editing / deletion updates before dispatching.
@@ -34,11 +34,11 @@ It will be an enhanced version of https://github.com/exynos967/MaiBot-Telegram-A
 14. Allow force no reply to other bots. Method 1: discarding message that should reply (not recommended). Method 2: all messages to bot must be overrided as not quoted.
 
 15. `file_id` Optimization: Except when local storage is explicitly requested by the core for analysis/reading, all Telegram media (photos, documents, audio) should be referenced and resent via their Telegram `file_id` without downloading them locally.
-  15.1 With a same image will have a same file id in mind, a same image should never be recognized twice (unless required), but caching with its file id.
+  15.1 With a same image will have a same file id in mind, a same image should never be recognized twice (unless required), but caching with its file id. However this is just a thought - image recognition is managed by the Maibot core. If we can't get the recognized result and store it, we cannot make it cached.
 16. Sticker Management: Support reading, caching/storing, and invoking/sending stickers, indexed by their media file id, and queried by their associated emoji. Since MaiBot support both sticker management and image recognition, stickers (thumbnails for animated?) may also support these features if exist. Sticker assigned emoji is also a critical hint for recognition / calling alongside image understanding. And remember you can send stickers with file ids like any other media. If we have understood an sticker (like via image recognition), next time a sticker with same file id comes, we know what it means.
 17. GIF / Animation Strategy: Telegram stores GIFs as `.mp4` video files, which MaiBot does not natively support currently (it might support GIF itself instead). Unless converted into true GIF or static image format without requiring heavy external dependencies (such as `ffmpeg`) (surely, if no need for user manually install libraries, this can be an option. Maibot docker uses Debian. If run on bare machine, detecting and installing if missing under approval is also an considerable option), or unless Telegram provides an accessible static thumbnail, discard GIF media. Can be an option.
-  17.1 Don't ask user to install ffmpeg, I think. And I heard some libraries like PyAV has bundled ffmpeg into it.
-18. Link Previews & Web Scraping: Support extracting Telegram’s built-in webpage preview description (but might only supported by user), or falling back to light HTTP requests to fetch link metadata. Include support for configurable User-Agents with multiple presets (like, default to GoogleBot) with automatic fallback.
+  17.1 Don't ask user to manually install ffmpeg, I think. And I heard some libraries like PyAV has bundled ffmpeg into it, but it comes with large size. Could make it an option to allow user to install and process.
+18. Link Previews & Web Scraping: Support extracting Telegram’s built-in webpage preview description (but might only supported by user), or falling back to light HTTP requests to fetch link metadata. Include support for configurable User-Agents with multiple presets (like, default to GoogleBot) with automatic fallback (GoogleBot -> browser -> curl or python / request defaults or none).
 
 19. Typing Status Indicator: Display a Telegram "typing..." action/status while the core is thinking, generating, or preparing a response. Send once, do not keep refreshing the typing status.
 20. Reaction Handling: Support reading incoming reaction emojis (if supported by the account/bot type) and sending. If possible, should be able to detect long pressed reactions (which show the full animation of the emoji, representing a strong emotion)
@@ -51,11 +51,10 @@ It will be an enhanced version of https://github.com/exynos967/MaiBot-Telegram-A
 24. I think MaiBot should be an async framework. Please properly deal with the async / event loop things.
 25. Forward awareness: like, user B (forwarded from user A) says:...
   25.1 In the original adapter, in a group, the linked channel's message will be read as sent from Telegram. This should be handled correctly to the channel itself in our version.
-26. The maximum length of a Telegram text message is 4096. Returns an error if the passed in message length exceeds that, and raises a warning of split the message or recommend to post to Telegra.ph if exceed 1000 characters. The length should be counted correctly, or greedy, for example, a CJK character should take a length of 2, and an emoji might take 3.
-  26.1 Telegra.ph is a text publishing platform built by Telegram. it supports long text posting, and it supports markdown. However, it does not support edit, and the posts are permanent and public. so, the description should mention this. The author information can be created every time, but it's recommended to create it once and reuse every time.
-  26.2 We can make a long text posting API that connects to Telegra.ph.
-  26.3 If we are to post links for long text, it's a good idea to attach a brief summary of it for bots which can't read the link or users who are too lazy to click it. However, in this function and all other parts of this adapter, no LLM functionality should be integrated. Luckily, Telegram provides a AI summary service called Cocoon AI Summary, though it might require Telegram client or user identity in Telethon to access `messages.summarizeText`.
+26. The maximum length of a Telegram text message is 4096 (if I remember correctly). To avoid flooding caused by long texts, and to respect the limit, returns an error if the passed in message length exceeds that, and raises a warning of split the message or recommend to post to Telegra.ph if exceed 1000 characters. The length should be counted correctly, or greedy, for example, a CJK character should take a length of 2, and an emoji might take 3.
+  26.1 Telegra.ph is a text publishing platform built by Telegram. it supports long text posting, and it supports markdown. However, it does not support edit, and the posts are permanent and public. so, the description (either for user in conf interface or for AI agents in tool description) should mention this. The author information can be created every time, but it's recommended to create it once and reuse every time.
+  26.2 We can also create a long text posting API that connects to Telegra.ph.
+  26.3 If we are to post links for long text, it's a good idea to attach a brief summary of it for bots which can't read the link or users who are too lazy to click it. However, in this function and all other parts of this adapter, no LLM functionality (that requires user to fill in provider and API key to invoke) should be integrated. Luckily, Telegram provides a AI summary service called Cocoon AI Summary, though it might require Telegram client or user identity in Telethon to access `messages.summarizeText`. Not mandatory.
 27. All storing we mentioned, we should first see if we can integrate to MaiBot's (afaik they have some advanced sql service), if not fallback to sqlite or other technique you prefer.
 28. With so many plans and requirements, we should make each component a script rather than a single huge py file for better maintenance. This is only a suggestion.
 29. Button callbacks data are discarded by default, but the core can register specific pattern of callback data (or set the pattern to an empty string to receive all, which is not recommended) to receive, so that if the core has created buttons that receive user input, the callback data will be pushed to the core instead of be dismissed.
-
