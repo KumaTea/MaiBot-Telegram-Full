@@ -87,7 +87,7 @@ class AccountSection(PluginConfigBase):
     )
     phone: str = Field(
         default="",
-        description="手机号（账号类型为 user 时必填，含国家码）",
+        description="手机号（账号类型为 user 且尚未登录时必填，含国家码）",
         json_schema_extra=_ui(
             "手机号", "Phone number", "含国家码，例如 +8613800000000", "With country code, e.g. +15550000000",
             placeholder="+8613800000000", order=4, depends_on="type", depends_value="user",
@@ -143,8 +143,6 @@ class AccountSection(PluginConfigBase):
             errors.append("account.api_id / account.api_hash are required (https://my.telegram.org)")
         if self.type == "bot" and not self.bot_token:
             errors.append("account.bot_token is required for bot accounts")
-        if self.type == "user" and not self.phone:
-            errors.append("account.phone is required for user accounts")
         if not self.session_name:
             errors.append("account.session_name must not be empty")
         return errors
@@ -203,17 +201,148 @@ class InboundSection(PluginConfigBase):
             order=1,
         ),
     )
+    command_filter_mode: Literal["drop", "stack"] = Field(
+        default="drop",
+        description="被过滤的命令如何处理：drop 直接丢弃；stack 保留在上下文中，但不单独触发回复（随下一条普通消息一起交给 MaiBot）",
+        json_schema_extra=_ui("命令过滤方式", "Filtered commands", order=2),
+    )
+    own_messages: Literal["context", "drop"] = Field(
+        default="context",
+        description="用户账号：你在其他设备上用这个账号亲自发的消息。context 作为麦麦自己说过的话交给 MaiBot；drop 丢弃",
+        json_schema_extra=_ui(
+            "本账号手动发送的消息", "Messages you send yourself",
+            "仅用户账号有效。适配器自己发出的消息不会重复回传",
+            "User accounts only. Messages sent by the adapter itself are never echoed back",
+            order=3,
+        ),
+    )
     reply_preview_length: int = Field(
         default=200,
         ge=0,
         description="被回复消息的内容预览最大长度（字符）",
-        json_schema_extra=_ui("回复预览长度", "Reply preview length", order=2),
+        json_schema_extra=_ui("回复预览长度", "Reply preview length", order=4),
+    )
+
+
+class DispatchSection(PluginConfigBase):
+    """When messages are handed to MaiBot (requirements R7–R11).
+
+    MaiBot already batches on its side: it waits about 1 s after an interrupting message and scores
+    each chat's backlog before planning. The silence window and lazy push below add to that wait, so
+    they are off by default.
+    """
+
+    __ui_label__: ClassVar[str] = "投递节奏"
+    __ui_order__: ClassVar[int] = 4
+    __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = _section_i18n("Delivery timing")
+
+    edit_debounce: float = Field(
+        default=3.0,
+        ge=0,
+        le=120,
+        description="消息被编辑后，等待多少秒没有再次编辑才把修改告知 MaiBot（连续快速编辑只告知最后一次）",
+        json_schema_extra=_ui("编辑合并等待（秒）", "Edit debounce (s)", order=0),
+    )
+    edit_notice: bool = Field(
+        default=True,
+        description="已交给 MaiBot 的消息被编辑时，以通知形式告知（可能引发回复）。尚未交出的消息被编辑时直接替换内容",
+        json_schema_extra=_ui("告知消息编辑", "Report edits", order=1),
+    )
+    deletion_notice: bool = Field(
+        default=True,
+        description="已交给 MaiBot 的消息被删除时，以通知形式告知。尚未交出的消息被删除时直接丢弃",
+        json_schema_extra=_ui("告知消息删除", "Report deletions", order=2),
+    )
+    silence_window: float = Field(
+        default=0.0,
+        ge=0,
+        le=300,
+        description="静默窗口：聊天中连续多少秒没有新消息、编辑或删除后才投递。0 为关闭（MaiBot 自身已有约 1 秒的等待）",
+        json_schema_extra=_ui("静默窗口（秒）", "Silence window (s)", order=3),
+    )
+    typing_hold: bool = Field(
+        default=True,
+        description="有人正在输入时暂缓投递，等对方输入结束（仅用户账号能收到输入状态）",
+        json_schema_extra=_ui("等待对方输入完成", "Wait while others type", order=4),
+    )
+    typing_max_hold: float = Field(
+        default=20.0,
+        ge=0,
+        le=300,
+        description="因对方正在输入而暂缓投递的最长时间（秒）",
+        json_schema_extra=_ui("输入等待上限（秒）", "Typing hold limit (s)", order=5,
+                              depends_on="typing_hold", depends_value=True),
+    )
+    lazy_mode: Literal["off", "count", "interval", "adaptive"] = Field(
+        default="off",
+        description=(
+            "攒批投递：off 立即投递；count 攒够 N 条再投递；interval 每隔固定秒数投递一次；"
+            "adaptive 按群聊活跃度自动调整批量（越热闹攒得越多）。MaiBot 自身会对积压消息评分后再决定是否回复"
+        ),
+        json_schema_extra=_ui("攒批投递", "Lazy push", order=6),
+    )
+    lazy_count: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description="count 模式的条数；adaptive 模式在还不了解群聊节奏时的初始条数",
+        json_schema_extra=_ui("攒批条数", "Batch size", order=7),
+    )
+    lazy_interval: float = Field(
+        default=10.0,
+        ge=1,
+        le=600,
+        description="interval 模式的投递间隔（秒）",
+        json_schema_extra=_ui("投递间隔（秒）", "Push interval (s)", order=8,
+                              depends_on="lazy_mode", depends_value="interval"),
+    )
+    lazy_max_count: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        description="adaptive 模式的批量上限",
+        json_schema_extra=_ui("自适应批量上限", "Adaptive batch cap", order=9,
+                              depends_on="lazy_mode", depends_value="adaptive"),
+    )
+    max_wait: float = Field(
+        default=60.0,
+        ge=1,
+        le=3600,
+        description="任何消息在适配器中最多等待多少秒，到时无论如何都会投递",
+        json_schema_extra=_ui("最长等待（秒）", "Max wait (s)", order=10),
+    )
+    urgent_bypass: bool = Field(
+        default=True,
+        description="@ 我、回复我的消息以及私聊消息跳过静默窗口与攒批，尽快投递（仍会等待对方输入完成）",
+        json_schema_extra=_ui("提及与私聊优先", "Mentions and DMs skip batching", order=11),
+    )
+    history_poll: Literal["auto", "on", "off"] = Field(
+        default="auto",
+        description=(
+            "定期重读最近消息，发现编辑与删除。auto 仅 Bot 账号开启（Bot 收不到删除通知）。"
+            "轮询发现的变化只更新 MaiBot 的上下文，不会触发回复"
+        ),
+        json_schema_extra=_ui("历史轮询", "History polling", order=12),
+    )
+    poll_interval: float = Field(
+        default=60.0,
+        ge=10,
+        le=3600,
+        description="历史轮询间隔（秒）",
+        json_schema_extra=_ui("轮询间隔（秒）", "Poll interval (s)", order=13),
+    )
+    poll_count: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="每个聊天每次轮询重读的最近消息条数（仅最近一小时内交给 MaiBot 的消息）",
+        json_schema_extra=_ui("轮询条数", "Messages per poll", order=14),
     )
 
 
 class OutboundSection(PluginConfigBase):
     __ui_label__: ClassVar[str] = "发送"
-    __ui_order__: ClassVar[int] = 4
+    __ui_order__: ClassVar[int] = 5
     __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = _section_i18n("Outbound")
 
     text_format: Literal["markdown", "plain"] = Field(
@@ -252,12 +381,84 @@ class OutboundSection(PluginConfigBase):
     )
 
 
+USER_AGENT_PRESETS = ("googlebot", "browser", "curl", "default", "none")
+
+
+class MediaSection(PluginConfigBase):
+    __ui_label__: ClassVar[str] = "媒体"
+    __ui_order__: ClassVar[int] = 6
+    __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = _section_i18n("Media")
+
+    recognition_cache: bool = Field(
+        default=True,
+        description="同一张图片或贴纸再次出现时，直接复用 MaiBot 已有的识别结果，不再下载和识别",
+        json_schema_extra=_ui(
+            "识别结果复用", "Reuse recognition results",
+            "按 Telegram 文件判断是否相同；命中时既不下载也不消耗识图额度",
+            "Matched by Telegram file; a hit skips both the download and image recognition",
+            order=0,
+        ),
+    )
+    native_resend: bool = Field(
+        default=True,
+        description="MaiBot 发出的图片或表情若来自 Telegram（例如收到过的贴纸），直接引用原文件发送，保留原生贴纸/动图效果且无需重新上传",
+        json_schema_extra=_ui("原生转发已知媒体", "Resend known media natively", order=1),
+    )
+    sticker_emoji_hint: bool = Field(
+        default=True,
+        description="在贴纸前附上它代表的 emoji，例如 [贴纸 😂]，帮助 MaiBot 理解贴纸含义",
+        json_schema_extra=_ui("贴纸 emoji 提示", "Sticker emoji hint", order=2),
+    )
+    animation: Literal["thumbnail", "gif", "drop"] = Field(
+        default="thumbnail",
+        description="GIF 动图与视频贴纸：thumbnail 使用 Telegram 提供的静态缩略图；gif 转成真正的 GIF，MaiBot 能看到多帧（需要 PyAV）；drop 只保留 [动图] 标记",
+        json_schema_extra=_ui(
+            "动图处理", "Animations",
+            "Telegram 的 GIF 实际是 MP4 视频。gif 模式在 PyAV 缺失时退回缩略图",
+            "Telegram GIFs are MP4 videos. gif mode falls back to thumbnails while PyAV is missing",
+            order=3,
+        ),
+    )
+    install_pyav: bool = Field(
+        default=False,
+        description="动图处理为 gif 且未安装 PyAV 时，允许适配器自动安装（约 30–60 MB，自带 ffmpeg，无需另装系统依赖）",
+        json_schema_extra=_ui("自动安装 PyAV", "Install PyAV automatically", order=4,
+                              depends_on="animation", depends_value="gif"),
+    )
+    video_thumbnail: bool = Field(
+        default=False,
+        description="为视频与视频消息附上缩略图供 MaiBot 识别（会消耗识图额度）",
+        json_schema_extra=_ui("视频缩略图", "Video thumbnails", order=5),
+    )
+    link_preview: Literal["off", "telegram", "fetch"] = Field(
+        default="fetch",
+        description="链接信息：telegram 只用 Telegram 自带的网页预览；fetch 在没有预览时由适配器自行读取网页标题与简介；off 关闭",
+        json_schema_extra=_ui("链接信息", "Link information", order=6),
+    )
+    link_user_agents: list[str] = Field(
+        default_factory=lambda: ["googlebot", "browser", "curl", "default"],
+        description="读取网页时依次尝试的 User-Agent。预设：googlebot / browser / curl / default（HTTP 库默认）/ none（不发送）；也可填写完整的 UA 字符串",
+        json_schema_extra=_ui("User-Agent 顺序", "User-Agent order", order=7,
+                              depends_on="link_preview", depends_value="fetch"),
+    )
+    link_timeout: float = Field(
+        default=4.0,
+        ge=1.0,
+        le=30.0,
+        description="读取网页时每次请求的超时时间（秒）",
+        json_schema_extra=_ui("网页请求超时（秒）", "Page request timeout (s)", order=8,
+                              depends_on="link_preview", depends_value="fetch"),
+    )
+
+
 class TelegramFullConfig(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
     account: AccountSection = Field(default_factory=AccountSection)
     connection: ConnectionSection = Field(default_factory=ConnectionSection)
     inbound: InboundSection = Field(default_factory=InboundSection)
+    dispatch: DispatchSection = Field(default_factory=DispatchSection)
     outbound: OutboundSection = Field(default_factory=OutboundSection)
+    media: MediaSection = Field(default_factory=MediaSection)
 
     def connection_fingerprint(self) -> tuple[Any, ...]:
         """Fields whose change requires reconnecting the Telegram client."""

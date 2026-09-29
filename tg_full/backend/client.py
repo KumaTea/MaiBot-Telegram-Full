@@ -15,11 +15,14 @@ from telethon import TelegramClient, errors, events, functions, types, utils
 
 from ..ids import ChatTarget
 from ..text.entities import Entity
-from .convert import message_from_tl, peer_from_entity
-from .models import Message, Peer
+from .convert import best_thumb, media_ref, message_from_tl, peer_from_entity
+from .models import MediaRef, Message, Peer
 
 MessageCallback = Callable[[Message], Awaitable[None]]
 CodeProvider = Callable[[], Awaitable[str]]
+RefRefresher = Callable[[], Awaitable["MediaRef | None"]]
+DeletionCallback = Callable[["int | None", list[int]], Awaitable[None]]
+TypingCallback = Callable[[int, int, bool], Awaitable[None]]
 
 
 class LoginError(RuntimeError):
@@ -99,6 +102,7 @@ class TelegramBackend:
         api_hash: str,
         proxy: str = "",
         flood_sleep_threshold: int = 60,
+        app_version: str = "",
         logger: logging.Logger,
     ) -> None:
         self.logger = logger
@@ -112,8 +116,11 @@ class TelegramBackend:
             retry_delay=2,
             auto_reconnect=True,
             request_retries=3,
+            device_model="MaiBot Telegram Full",
+            app_version=app_version,
         )
         self.me: Peer | None = None
+        self._chat_locks: dict[int, asyncio.Lock] = {}
 
     # ---- lifecycle ---------------------------------------------------------------------
 
@@ -148,10 +155,13 @@ class TelegramBackend:
     async def _login_user(self, phone: str, password: str, wait_for_code: CodeProvider) -> Peer:
         if await self.client.is_user_authorized():
             return await self._load_me()
+        if not phone:
+            raise LoginError("The session is not logged in and account.phone is empty.")
         sent = await self.client.send_code_request(phone)
+        masked = phone[:3] + "*" * max(len(phone) - 6, 0) + phone[-3:] if len(phone) > 6 else "***"
         self.logger.warning(
-            "Telegram sent a login code to %s. Enter it in the plugin config field account.login_code "
-            "(MaiBot WebUI) and save.", phone,
+            "Telegram sent a login code for %s to your other devices. Enter it in the plugin config field "
+            "account.login_code (MaiBot WebUI) and save.", masked,
         )
         while True:
             code = await wait_for_code()
@@ -185,24 +195,57 @@ class TelegramBackend:
 
     # ---- events ------------------------------------------------------------------------
 
-    def on_new_message(self, callback: MessageCallback) -> None:
-        """Deliver new messages to ``callback`` one at a time per chat, in arrival order.
+    def _message_handler(self, callback: MessageCallback, what: str) -> Callable[[Any], Awaitable[None]]:
+        """Wrap ``callback`` so messages of one chat are handled one at a time, in arrival order.
 
-        Telethon runs each update in its own task; without the per-chat lock a message with a
-        slow download could be overtaken by the next one.
+        Telethon runs each update in its own task; without the per-chat lock a message with a slow
+        download could be overtaken by the next one, or by its own edit.
         """
-        locks: dict[int, asyncio.Lock] = {}
 
-        async def handler(event: events.NewMessage.Event) -> None:
-            async with locks.setdefault(event.chat_id, asyncio.Lock()):
+        async def handler(event: Any) -> None:
+            async with self._chat_locks.setdefault(event.chat_id, asyncio.Lock()):
                 try:
                     message = await message_from_tl(self.client, event.message)
                     if message is not None:
                         await callback(message)
                 except Exception:
-                    self.logger.exception("Failed to handle message %s in chat %s", event.id, event.chat_id)
+                    self.logger.exception("Failed to handle %s %s in chat %s", what, event.id, event.chat_id)
 
-        self.client.add_event_handler(handler, events.NewMessage())
+        return handler
+
+    def on_new_message(self, callback: MessageCallback) -> None:
+        self.client.add_event_handler(self._message_handler(callback, "message"), events.NewMessage())
+
+    def on_message_edited(self, callback: MessageCallback) -> None:
+        self.client.add_event_handler(self._message_handler(callback, "edit"), events.MessageEdited())
+
+    def on_message_deleted(self, callback: DeletionCallback) -> None:
+        """``callback(chat_id, ids)``; ``chat_id`` is ``None`` for private chats and basic groups of
+        user accounts, which Telegram reports without a chat. Bots receive no deletions at all."""
+
+        async def handler(event: events.MessageDeleted.Event) -> None:
+            try:
+                await callback(event.chat_id, list(event.deleted_ids or []))
+            except Exception:
+                self.logger.exception("Failed to handle deletion in chat %s", event.chat_id)
+
+        self.client.add_event_handler(handler, events.MessageDeleted())
+
+    def on_typing(self, callback: TypingCallback) -> None:
+        """``callback(chat_id, user_id, active)`` for "typing / recording / uploading" and their cancel.
+
+        Only user accounts receive these updates."""
+
+        async def handler(event: events.UserUpdate.Event) -> None:
+            if event.action is None or event.chat_id is None or event.user_id is None:
+                return  # online-status updates
+            active = not isinstance(event.action, types.SendMessageCancelAction)
+            try:
+                await callback(event.chat_id, event.user_id, active)
+            except Exception:
+                self.logger.exception("Failed to handle typing in chat %s", event.chat_id)
+
+        self.client.add_event_handler(handler, events.UserUpdate())
 
     # ---- sending -----------------------------------------------------------------------
 
@@ -329,11 +372,68 @@ class TelegramBackend:
         )
         return await self._send(request, peer, target)
 
+    async def send_ref(
+        self,
+        target: ChatTarget,
+        ref: MediaRef,
+        *,
+        reply_to: int | None = None,
+        refresh: RefRefresher | None = None,
+    ) -> int:
+        """Send an existing Telegram file by reference, refreshing an expired ``file_reference`` once."""
+        peer = await self.client.get_input_entity(target.chat_id)
+        for attempt in range(2):
+            if ref.type == "photo":
+                media: Any = types.InputMediaPhoto(types.InputPhoto(ref.id, ref.access_hash, ref.file_reference))
+            else:
+                media = types.InputMediaDocument(types.InputDocument(ref.id, ref.access_hash, ref.file_reference))
+            request = functions.messages.SendMediaRequest(
+                peer=peer, media=media, message="", reply_to=self._reply_header(target, reply_to)
+            )
+            try:
+                return await self._send(request, peer, target)
+            except (errors.FileReferenceExpiredError, errors.FileReferenceInvalidError, errors.FileReferenceEmptyError):
+                fresh = await refresh() if refresh is not None and attempt == 0 else None
+                if fresh is None:
+                    raise
+                ref = fresh
+        raise RuntimeError("unreachable")
+
     # ---- reading -----------------------------------------------------------------------
 
     async def download(self, message: Message, thumb: bool = False) -> bytes | None:
+        """Download the message's media, or its best real thumbnail (``None`` if there is none)."""
         raw = message.raw
         if raw is None:
             return None
-        data = await self.client.download_media(raw, file=bytes, thumb=-1 if thumb else None)
+        thumb_size = None
+        if thumb:
+            thumb_size = best_thumb(raw.document) if raw.document is not None else None
+            if thumb_size is None:
+                return None
+        data = await self.client.download_media(raw, file=bytes, thumb=thumb_size)
         return data if isinstance(data, bytes) else None
+
+    async def peer(self, chat_id: int) -> Peer | None:
+        """Describe a chat from Telethon's entity cache (fetching it if needed)."""
+        try:
+            return peer_from_entity(await self.client.get_entity(chat_id))
+        except (ValueError, errors.RPCError) as exc:
+            self.logger.debug("Cannot resolve chat %s: %r", chat_id, exc)
+            return None
+
+    async def get_messages(self, chat_id: int, ids: Sequence[int]) -> list[Message | None]:
+        """Re-read messages by id (works for bots too). Deleted or inaccessible ones come back ``None``."""
+        raws = await self.client.get_messages(chat_id, ids=list(ids))
+        return [await message_from_tl(self.client, raw, resolve_reply=False) if raw is not None else None for raw in raws]
+
+    async def fetch_media_ref(self, chat_id: int, msg_id: int) -> MediaRef | None:
+        """Re-read a message to get a fresh ``file_reference`` for its media."""
+        try:
+            raw = await self.client.get_messages(chat_id, ids=msg_id)
+        except (ValueError, errors.RPCError) as exc:
+            self.logger.debug("Cannot refetch %s/%s: %r", chat_id, msg_id, exc)
+            return None
+        if raw is None:
+            return None
+        return media_ref(raw.photo or raw.document)

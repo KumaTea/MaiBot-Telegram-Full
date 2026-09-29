@@ -51,6 +51,16 @@ class WebPage:
 
 
 @dataclass(frozen=True)
+class MediaRef:
+    """Enough to resend a Telegram file without uploading it again (``file_reference`` expires)."""
+
+    type: Literal["photo", "document"]
+    id: int
+    access_hash: int
+    file_reference: bytes
+
+
+@dataclass(frozen=True)
 class Media:
     kind: str  # photo, sticker, animation, video, video_note, voice, audio, document, poll, geo, contact, dice, …
     file_key: str | None = None  # stable per file across chats: "<kind>:<telegram id>"
@@ -65,7 +75,9 @@ class Media:
     performer: str | None = None
     sticker_format: Literal["static", "animated", "video"] | None = None
     details: str | None = None  # short human readable extras (poll options, coordinates, …)
-    has_thumb: bool = False
+    has_thumb: bool = False  # a real thumbnail (not the tiny inline preview) is available
+    ref: MediaRef | None = None
+    sticker_set: tuple[int, int] | None = None  # (id, access_hash)
 
 
 @dataclass

@@ -11,6 +11,9 @@ def test_manifest_is_adapter():
     assert manifest["plugin_type"] == "adapter"
     names = {d["name"] for d in manifest["dependencies"] if d["type"] == "python_package"}
     assert "telethon" in names
+    from tg_full.constants import VERSION
+
+    assert manifest["version"] == VERSION
 
 
 def test_plugin_loads_like_maibot_runner(plugin_module):

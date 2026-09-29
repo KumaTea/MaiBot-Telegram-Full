@@ -46,9 +46,18 @@
       "type": "python_package",
       "name": "Pillow",
       "version_spec": ">=9.0"
+    },
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.8"
     }
   ],
-  "capabilities": [],
+  "capabilities": [
+    "database.get",
+    "chat.get_all_streams",
+    "maisaka.context.append"
+  ],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [

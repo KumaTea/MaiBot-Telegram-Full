@@ -1,5 +1,6 @@
 """Shared constants."""
 
+VERSION = "0.1.0"  # keep in sync with _manifest.json
 PLATFORM = "telegram"
 GATEWAY_NAME = "telegram_full_gateway"
 PROTOCOL = "mtproto"

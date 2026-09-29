@@ -12,9 +12,11 @@ from typing import Any
 from .backend.client import LoginError, TelegramBackend
 from .backend.models import Message, Peer
 from .config import TelegramFullConfig
-from .constants import GATEWAY_NAME, PLATFORM, PROTOCOL, STORE_FILENAME
+from .constants import GATEWAY_NAME, PLATFORM, PROTOCOL, STORE_FILENAME, VERSION
 from .inbound.codec import InboundCodec
-from .inbound.filters import drop_reason
+from .inbound.pipeline import InboundPipeline
+from .media.cache import MediaCache
+from .media.link_preview import LinkPreviewer
 from .outbound.sender import OutboundSender
 from .store import Store
 
@@ -32,6 +34,7 @@ class AdapterRuntime:
         self.inbound: InboundCodec | None = None
         self.sender: OutboundSender | None = None
         self.me: Peer | None = None
+        self.pipeline: InboundPipeline | None = None
         self._task: asyncio.Task[None] | None = None
         self._codes: asyncio.Queue[str] = asyncio.Queue()
         # A code already in the config belongs to an earlier login attempt and has expired.
@@ -56,9 +59,13 @@ class AdapterRuntime:
             api_hash=cfg.account.api_hash,
             proxy=cfg.connection.proxy,
             flood_sleep_threshold=cfg.connection.flood_sleep_threshold,
+            app_version=VERSION,
             logger=self.logger,
         )
         self.backend.on_new_message(self._on_message)
+        self.backend.on_message_edited(self._on_edit)
+        self.backend.on_message_deleted(self._on_delete)
+        self.backend.on_typing(self._on_typing)
         self._task = asyncio.create_task(self._run(), name="telegram_full.connection")
 
     async def stop(self) -> None:
@@ -67,6 +74,7 @@ class AdapterRuntime:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        await self._close_pipeline()
         if self.backend is not None:
             with contextlib.suppress(Exception):
                 await self.backend.disconnect()
@@ -111,16 +119,31 @@ class AdapterRuntime:
         else:
             me = await backend.login_user(account.phone, account.password, self._wait_for_code)
         self.me = me
+        cache = MediaCache(self.store, self.ctx.db, self.logger)
         self.inbound = InboundCodec(
             me=me,
             settings=lambda: self.config().inbound,
+            media_settings=lambda: self.config().media,
             download=backend.download,
             is_known=self.store.is_known_to_core,
+            cache=cache,
+            links=LinkPreviewer(self.store, lambda: self.config().media, self.logger),
             logger=self.logger,
         )
         self.sender = OutboundSender(
-            backend=backend, store=self.store, settings=lambda: self.config().outbound, logger=self.logger
+            backend=backend,
+            store=self.store,
+            settings=lambda: self.config().outbound,
+            media_settings=lambda: self.config().media,
+            cache=cache,
+            logger=self.logger,
         )
+        await self._close_pipeline()
+        self.pipeline = InboundPipeline(
+            ctx=self.ctx, me=me, backend=backend, store=self.store, codec=self.inbound, config=self.config,
+            logger=self.logger,
+        )
+        self.pipeline.start()
         self.logger.info(
             "Connected to Telegram as %s (id=%s%s). Use platform account \"telegram:%s\" in MaiBot if needed.",
             me.name, me.id, f", @{me.username}" if me.username else "", me.id,
@@ -128,6 +151,11 @@ class AdapterRuntime:
         await self._set_ready(True)
         await backend.disconnected
         return True
+
+    async def _close_pipeline(self) -> None:
+        pipeline, self.pipeline = self.pipeline, None
+        if pipeline is not None:
+            await pipeline.close()
 
     async def _wait_for_code(self) -> str:
         await self._set_ready(False, login_state="waiting_for_code")
@@ -153,36 +181,23 @@ class AdapterRuntime:
         except Exception as exc:
             self.logger.debug("Gateway state update failed: %r", exc)
 
-    # ---- inbound -----------------------------------------------------------------------
+    # ---- inbound (forwarded to the pipeline of the current session) ---------------------
 
     async def _on_message(self, message: Message) -> None:
-        me, store, codec = self.me, self.store, self.inbound
-        if me is None or store is None or codec is None:
-            return
-        sender = message.sender
-        await store.record_message(
-            message.chat.id, message.id, sender.id if sender else None, bool(sender and sender.is_bot),
-            is_outgoing=message.outgoing, routed=False, date=message.date.timestamp(),
-        )
-        reason = drop_reason(message, me, self.config().inbound)
-        if reason is not None:
-            self.logger.debug("Dropped %s/%s: %s", message.chat.id, message.id, reason)
-            return
-        payload = await codec.build(message)
-        if payload is None:
-            return
-        message_id = payload["message_id"]
-        accepted = await self.ctx.gateway.route_message(
-            GATEWAY_NAME,
-            payload,
-            route_metadata={"self_id": str(me.id), "platform_io_account_id": str(me.id)},
-            external_message_id=message_id,
-            dedupe_key=message_id,
-        )
-        if accepted:
-            await store.mark_routed(message.chat.id, message.id)
-        else:
-            self.logger.debug("MaiBot did not accept %s (adapter chat policy?)", message_id)
+        if self.pipeline is not None:
+            await self.pipeline.on_message(message)
+
+    async def _on_edit(self, message: Message) -> None:
+        if self.pipeline is not None:
+            await self.pipeline.on_edit(message)
+
+    async def _on_delete(self, chat_id: int | None, msg_ids: list[int]) -> None:
+        if self.pipeline is not None:
+            await self.pipeline.on_delete(chat_id, msg_ids)
+
+    async def _on_typing(self, chat_id: int, user_id: int, active: bool) -> None:
+        if self.pipeline is not None:
+            await self.pipeline.on_typing(chat_id, user_id, active)
 
     # ---- outbound ----------------------------------------------------------------------
 

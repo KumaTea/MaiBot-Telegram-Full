@@ -7,8 +7,10 @@ from collections.abc import Callable
 from typing import Any
 
 from ..backend.client import TelegramBackend
-from ..config import OutboundSection
+from ..backend.models import MediaRef
+from ..config import MediaSection, OutboundSection
 from ..ids import encode_message_id
+from ..media.cache import MediaCache
 from ..store import Store
 from .codec import OutboundError, OutItem, SendPlan, build_plan
 
@@ -24,11 +26,15 @@ class OutboundSender:
         backend: TelegramBackend,
         store: Store,
         settings: Callable[[], OutboundSection],
+        media_settings: Callable[[], MediaSection] = MediaSection,
+        cache: MediaCache | None = None,
         logger: logging.Logger,
     ) -> None:
         self.backend = backend
         self.store = store
         self.settings = settings
+        self.media_settings = media_settings
+        self.cache = cache
         self.logger = logger
 
     async def _quote_target(self, plan: SendPlan) -> int | None:
@@ -43,7 +49,35 @@ class OutboundSender:
                 return None
         return plan.reply_to
 
+    async def _send_native(self, plan: SendPlan, item: OutItem, reply_to: int | None) -> int | None:
+        """Resend a Telegram file MaiBot got from us (e.g. a collected sticker) by reference."""
+        if self.cache is None or not item.source_hash or not self.media_settings().native_resend:
+            return None
+        found = await self.cache.ref_for_hash(item.source_hash)
+        if found is None:
+            return None
+        ref, row = found
+
+        async def refresh() -> MediaRef | None:
+            if row["origin_chat"] is None or row["origin_msg"] is None:
+                return None
+            fresh = await self.backend.fetch_media_ref(row["origin_chat"], row["origin_msg"])
+            if fresh is None or fresh.id != ref.id:
+                return None
+            await self.store.update_file_reference(row["file_key"], fresh.file_reference)
+            return fresh
+
+        try:
+            return await self.backend.send_ref(plan.target, ref, reply_to=reply_to, refresh=refresh)
+        except Exception as exc:
+            self.logger.info("Native resend of %s failed (%r); uploading instead", row["file_key"], exc)
+            return None
+
     async def _send_item(self, plan: SendPlan, item: OutItem, reply_to: int | None) -> int:
+        if item.kind != "text":
+            native = await self._send_native(plan, item, reply_to)
+            if native is not None:
+                return native
         if item.kind == "text" and item.text is not None:
             return await self.backend.send_text(
                 plan.target, item.text.text, item.text.entities, reply_to, self.settings().link_preview
@@ -82,7 +116,8 @@ class OutboundSender:
             sent.append(msg_id)
             await self.store.record_message(
                 plan.target.chat_id, msg_id, me.id if me else None, bool(me and me.is_bot),
-                is_outgoing=True, routed=True,
+                is_outgoing=True, routed=True, topic_id=plan.target.topic_id,
+                text=item.text.text[:500] if item.text is not None else f"[{item.kind}]",
             )
 
         if not sent:

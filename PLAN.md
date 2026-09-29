@@ -232,7 +232,7 @@ so most logic is tested without Telegram.
   ["telegram:<id>"]` still works.
 - **Done when:** the bot chats in a test group and in DMs through MaiBot (text, replies, images).
 
-### Phase 2: User-account login ([R6], [R6.1], [R6.2])
+### Phase 2: User-account login ([R6], [R6.1], [R6.2]) — ✅ done 2026-09-29
 - Phone login. Pre-configured 2FA password; if 2FA is required and no password is set, fail with a
   clear error [R6.1].
 - **Login code input [R6.2]**, recommended approach:
@@ -240,51 +240,115 @@ so most logic is tested without Telegram.
      state metadata).
   2. The user types the code into the `account.login_code` field in the **MaiBot WebUI plugin
      config**.
-  3. `on_config_update` picks it up and finishes `sign_in`, then clears the field.
+  3. `on_config_update` picks it up and finishes `sign_in`. Plugins cannot write their own config
+     (`component.update_plugin_config` is reserved for the built-in plugin manager), so the field is
+     not cleared. Instead the adapter remembers used codes and ignores the value present at startup.
 
   This needs no extra ports or container exposure. Two alternatives:
   - `python -m tg_full.login` CLI (via `docker exec`) as a fallback
   - QR-code login (`client.qr_login()`) with the `tg://login?token=` URL printed as a terminal QR
 
   A temporary web page is possible but would need a port mapped in Docker, so it isn't the default.
+- An existing Telethon session file can be dropped into the plugin data dir and selected with
+  `account.session_name`; `account.phone` is then optional.
+- `inbound.own_messages` (default `context`): messages typed by a human on another device logged
+  into the same account reach MaiBot as the bot's own lines. The Host supports this ("guided_reply").
+  Telethon never dispatches updates caused by the adapter's own requests, so replies aren't echoed.
+- **User accounts are in many chats.** MaiBot's adapter policy (`config/adapter_policy.toml`, scoped
+  by `plugin_id` + `account_id`) must whitelist the chats the userbot should talk in. The adapter
+  caches "blocked" verdicts for 5 minutes, so it doesn't download media for chats MaiBot would
+  reject anyway. Caveat: the policy matches the MaiBot group id, so a forum topic
+  (`<chat>::tg-topic::mt=<n>`) is *not* covered by whitelisting `<chat>`. This needs handling (e.g.
+  a Host change, or an adapter option) before forum groups are supported properly.
 - **Done when:** a user account logs in once, restarts without asking again, and passes all Phase 1
   checks.
+- **Status (2026-09-29): ✅ done.** Verified on the test container with @Kuma_AI:
+  - log in from an existing session file (`kuma_ai`)
+  - mention, and reply to the bot's answer
+  - messages typed manually on the phone reach MaiBot as its own lines without triggering a reply
+  - the login-code flow with a fresh session (`kuma_ai_2`): code requested, entered in the WebUI,
+    logged in about 10 s later
+  - the blocked-chat cache (logs "Chat … is blocked by MaiBot's adapter policy")
 
-### Phase 3: Media pipeline ([R15], [R15.1], [R16], [R17], [R18])
-- `media/refs.py`: persist file refs + origin, refresh on `FILE_REFERENCE_EXPIRED`, resend by reference.
-- `recognition_cache.py`: `file_unique_id` → sha256 → Host `Images.description` → send without
-  downloading.
-- Stickers:
-  - index by document id, with emoji and set name
-  - send inbound stickers as emoji with an emoji hint
-  - native resend when a core emoji hash matches a known sticker
-  - LLM tools: "list stickers for 😂", "send sticker"
-- Animations: thumbnail by default; optional PyAV (installed by the adapter on opt-in); or discard.
-- Voice: bytes for ASR (the Host does transcription). Documents: `file` segment carrying name, size
-  and mime.
-- Link previews: first `MessageMediaWebPage` (title, description, site), otherwise a light HTTP fetch
-  of `<title>` and OpenGraph tags. UA chain is configurable, default GoogleBot → desktop browser →
-  curl → none.
-- **Done when:** a repeated image or sticker isn't downloaded again (checked in logs), the bot sends a
-  known sticker natively, and a GIF arrives as a static image.
+### Phase 3: Media pipeline ([R15], [R15.1], [R16], [R17], [R18]) — ✅ done 2026-09-29 (native resend verified by tests only)
+As built:
+- `media/cache.py` + store table `media`: every file given to MaiBot is recorded as
+  `(Telegram file, variant full/thumb/gif) → sha256 of the bytes MaiBot got → file reference
+  (id, access_hash, file_reference) + origin message + sticker emoji/set`.
+  - **Inbound [R15.1]:** when the same Telegram file appears again and MaiBot's `Images` table
+    already has a description for that sha256, the segment carries `[图片：…]` / `[表情包: …]` and
+    no bytes. MaiBot skips recognition, and the adapter skips the download.
+    Needs the `database.get` capability.
+  - **Outbound [R15, R16]:** an image or emoji from MaiBot whose hash is a known Telegram file is
+    resent by reference, so stickers and GIFs stay native and nothing is uploaded. An expired
+    `file_reference` is refreshed by re-reading the origin message once; if that fails, the adapter
+    uploads the bytes instead.
+- **Stickers [R16]:** static ones are sent as the webp itself; Lottie and video stickers use a real
+  thumbnail (≥100 px, never the tiny inline preview). Prefixed with `[贴纸 😂]` (configurable).
+- **Animations [R17]:** `media.animation`
+  - `thumbnail` (default)
+  - `gif`: a real GIF, 12 frames from the first 6 s, ≤320 px, which MaiBot's emoji system stitches
+    into frames for its vision model. Uses PyAV; with `media.install_pyav` the adapter installs it
+    itself in the background and uses thumbnails until then.
+  - `drop`: marker only.
+- `media.video_thumbnail` (off by default) attaches a video's thumbnail for recognition.
+- **Link previews [R18]:** Telegram's web page preview first. Otherwise (`media.link_preview =
+  fetch`) the adapter fetches the page:
+  - reads OpenGraph / `<title>` / meta description
+  - User-Agent chain, default googlebot → browser → curl → default; `none` sends no UA, and raw UA
+    strings are accepted
+  - charset from the header or `<meta charset>`
+  - results are cached for 24 h (negative results too)
+  - http(s) only; no address filtering (fake-ip DNS setups are common among Telegram users, so
+    LAN detection would break fetching)
+- **Moved to Phase 6:** the sticker *tools* for the LLM ("find stickers for 😂", "send sticker").
+  They need the same stream → chat resolution as the other tools. The index they need is already
+  stored.
+- **Done when:** a repeated image or sticker isn't downloaded again, a known sticker is sent
+  natively, a GIF arrives as a static image (or as a GIF in `gif` mode), and a link without a
+  Telegram preview gets a fetched summary.
 
-### Phase 4: Inbound dispatcher ([R7], [R8], [R9], [R10], [R11], [R12], [R13])
-- **Spike first:**
-  - confirm how the Host treats `is_notify` messages and `maisaka.context.append`, i.e. whether they
-    trigger the planner
-  - confirm what happens when a batch of `route_message` calls lands at once
-  - use the results to decide how edits, deletions and "stacked" commands are represented
-- Per-chat scheduler, testable with a fake clock:
-  - edit debounce, `n` seconds [R7]
-  - silence window: no new, edited or deleted messages for `n` seconds before dispatch [R8]
-  - typing hold, userbot only, with a maximum hold time so nobody can block us forever [R9]
-  - lazy push: by count, by interval, or adaptive (starts from a baseline, follows an EMA of the
-    chat's message rate, clamped to min/max) [R10]
-- Bot polling [R11]: re-fetch the IDs of the last *n* messages at an interval. It only updates state
-  (edits, reactions, deletions as notices or context) and never triggers a reply on its own [R11.2].
-- Filters:
-  - commands, level 1 (`/cmd@otherbot`) or level 2 (all), in mode `drop` or `stack` [R12]
-  - bot messages dropped regardless of Telegram's bot-to-bot setting [R13]
+### Phase 4: Inbound dispatcher ([R7], [R8], [R9], [R10], [R11], [R12], [R13]) — code deployed, live test pending
+**Spike results** (MaiBot 1.2.5):
+- `is_notify` messages run the full receive chain and enter Maisaka's message cache. They count as
+  pending external messages in its 读空气 score, and a new message can interrupt a running planner.
+  So **notices can trigger a reply**. NapCat uses them for recalls, pokes and the like, as plain
+  text like "X 撤回了一条消息".
+- `maisaka.context.append` appends straight to Maisaka's in-memory chat history, with no cache and
+  no scheduling, so it **never triggers**. It is not persisted, and it needs the stream id
+  (resolved via `chat.get_all_streams`, filtered by account).
+- MaiBot batches on its own: after an interrupting message it waits about 1 s, then scores the
+  backlog (threshold 80, "等待更多消息"). The adapter's silence window and lazy push add to that wait.
+
+**As built** (`inbound/dispatcher.py`, `inbound/pipeline.py`, config section `dispatch` / 投递节奏):
+- Per-chat queue plus task. The decision `next_action(state, now, settings)` is a pure function,
+  tested with a fake clock. Nothing waits longer than `max_wait` (60 s).
+- **[R7] Edits:**
+  - an edit to a still-queued message replaces it
+  - an edit to a message MaiBot has seen is debounced (`edit_debounce`, 3 s), then sent as a
+    notice "Alice 编辑了消息: 「old」→「new」" (may trigger)
+  - edits whose content is unchanged (reactions, pins, …) are ignored
+- **Deletions:**
+  - a still-queued message is dropped
+  - for a message MaiBot has seen, a notice "X发送的一条消息被删除了: 「…」"
+  - user accounts get deletions without a chat id for private chats and basic groups; they are
+    resolved from the store (one shared id sequence)
+- **[R8] Silence window:** off by default, because MaiBot already waits. Edits and deletions count
+  as activity.
+- **[R9] Typing hold:** on by default for user accounts (bots never receive typing). Any typing,
+  recording or uploading action holds the queue, up to `typing_max_hold` (20 s).
+- **[R10] Lazy push:** `off` (default) / `count` / `interval` / `adaptive`. Adaptive batch size is
+  about one message per 10 s of the chat's recent pace (EMA of intervals), starting at
+  `lazy_count` and capped at `lazy_max_count`.
+- **Mentions and private chats** skip the silence window and lazy push (`urgent_bypass`); the
+  typing hold still applies.
+- **[R11] History polling:** `auto` means bots only. It re-reads the last `poll_count` messages
+  MaiBot saw in the past hour, every `poll_interval`. Edits and deletions it finds go through
+  `maisaka.context.append` only and never trigger a reply [R11.2].
+- **[R12] `command_filter_mode = stack`:** filtered commands wait for the next real message and
+  are delivered with it. If none arrives within `max_wait`, they go to MaiBot as context only.
+- New capabilities: `chat.get_all_streams`, `maisaka.context.append`. Store schema v4 adds
+  sender name, text snapshot and topic id to `msg_meta`.
 - **Done when:** a burst of messages or edits produces one dispatch, and polling surfaces an edit made
   on another client without producing a reply.
 
@@ -308,7 +372,8 @@ so most logic is tested without Telegram.
 
 ### Phase 6: Capabilities exposed to the core ([R4], [R4.1], [R4.2])
 - **Tools (for the LLM):** a small, safe set, mostly from phases 3–5.
-  - `send_sticker`, `react`, `send_with_buttons`, `post_telegraph`, `get_message`
+  - `find_stickers` (by emoji, from the Phase 3 index), `send_sticker`, `react`, `send_with_buttons`,
+    `post_telegraph`, `get_message`
   - each description is short and states risks where there are any
 - **APIs (for other plugins):** the same operations, plus `get_chat_info` and `resolve_stream`.
 - **Raw invoke (`telegram_raw_invoke`):**

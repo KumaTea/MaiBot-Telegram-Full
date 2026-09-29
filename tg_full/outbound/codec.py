@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,7 @@ class OutItem:
     mime_type: str | None = None
     width: int = 512
     height: int = 512
+    source_hash: str | None = None  # MaiBot's hash of the original bytes, for native resending
 
 
 @dataclass
@@ -85,6 +87,10 @@ def _decode_binary(segment: dict[str, Any]) -> bytes | None:
         return base64.b64decode(raw)
     except (binascii.Error, ValueError):
         return None
+
+
+def _source_hash(segment: dict[str, Any], payload: bytes) -> str:
+    return str(segment.get("hash") or "") or hashlib.sha256(payload).hexdigest()
 
 
 def _mention_markdown(data: Any) -> str:
@@ -153,7 +159,8 @@ class _PlanBuilder:
                 kind = "document"  # Telegram rejects photos over 10 MB
             else:
                 kind = "photo"
-            self.add_media(OutItem(kind, data=payload, file_name=f"image.{fmt if fmt != 'unknown' else 'jpg'}"))
+            self.add_media(OutItem(kind, data=payload, file_name=f"image.{fmt if fmt != 'unknown' else 'jpg'}",
+                                   source_hash=_source_hash(segment, payload)))
         elif isinstance(data, str) and data.startswith(("http://", "https://")):
             self.buffer.append(f"\n{data}\n")
 
@@ -162,15 +169,18 @@ class _PlanBuilder:
         if not payload:
             return
         fmt = detect_format(payload)
+        source_hash = _source_hash(segment, payload)
         if fmt == "gif":
-            self.add_media(OutItem("animation", data=payload))
+            self.add_media(OutItem("animation", data=payload, source_hash=source_hash))
             return
         if fmt in ("png", "webp"):
             sticker = to_sticker_webp(payload)
             if sticker is not None:
-                self.add_media(OutItem("sticker", data=sticker[0], width=sticker[1], height=sticker[2]))
+                self.add_media(OutItem("sticker", data=sticker[0], width=sticker[1], height=sticker[2],
+                                       source_hash=source_hash))
                 return
-        self.add_media(OutItem("photo", data=payload, file_name=f"emoji.{fmt if fmt != 'unknown' else 'jpg'}"))
+        self.add_media(OutItem("photo", data=payload, file_name=f"emoji.{fmt if fmt != 'unknown' else 'jpg'}",
+                               source_hash=source_hash))
 
     def file(self, data: dict[str, Any], segment: dict[str, Any]) -> None:
         payload = _decode_binary(segment)

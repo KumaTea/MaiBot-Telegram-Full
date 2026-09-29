@@ -37,7 +37,9 @@ def test_filters():
     assert drop_reason(make_message("/start@rbevbot"), ME, settings) is None
     assert drop_reason(make_message("/start"), ME, settings) is None
     assert drop_reason(make_message("/start"), ME, InboundSection(command_filter="all")) == "command"
-    assert drop_reason(make_message(outgoing=True), ME, settings) == "own message"
+    assert drop_reason(make_message(outgoing=True), ME, settings) is None  # own_messages = context
+    assert drop_reason(make_message(outgoing=True), ME, InboundSection(own_messages="drop")) == "own message"
+    assert drop_reason(make_message("/x@otherbot", outgoing=True), ME, settings) == "command for another bot"
 
 
 # ---- inbound -----------------------------------------------------------------------------

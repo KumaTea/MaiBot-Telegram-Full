@@ -9,7 +9,7 @@ from telethon import TelegramClient, utils
 from telethon.tl import types
 
 from ..text.entities import Entity
-from .models import Forward, Media, Message, Peer, WebPage
+from .models import Forward, Media, MediaRef, Message, Peer, WebPage
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,37 @@ def _file_key(kind: str, obj: Any) -> str | None:
     return f"{kind}:{media_id}" if media_id is not None else None
 
 
+_MIN_THUMB_SIDE = 100  # smaller previews are useless for image recognition
+
+
+def best_thumb(document: Any) -> Any:
+    """Largest real thumbnail of a document, ignoring tiny inline previews and SVG outlines."""
+    best, best_side = None, 0
+    for thumb in getattr(document, "thumbs", None) or []:
+        if isinstance(thumb, (types.PhotoSize, types.PhotoSizeProgressive, types.PhotoCachedSize)):
+            side = max(thumb.w, thumb.h)
+            if side >= _MIN_THUMB_SIDE and side > best_side:
+                best, best_side = thumb, side
+    return best
+
+
+def media_ref(obj: Any) -> MediaRef | None:
+    if isinstance(obj, types.Photo):
+        return MediaRef("photo", obj.id, obj.access_hash, obj.file_reference)
+    if isinstance(obj, types.Document):
+        return MediaRef("document", obj.id, obj.access_hash, obj.file_reference)
+    return None
+
+
+def _sticker_set(document: Any) -> tuple[int, int] | None:
+    for attribute in getattr(document, "attributes", None) or []:
+        if isinstance(attribute, types.DocumentAttributeSticker) and isinstance(
+            attribute.stickerset, types.InputStickerSetID
+        ):
+            return attribute.stickerset.id, attribute.stickerset.access_hash
+    return None
+
+
 def media_from_message(msg: Any) -> Media | None:
     """Describe the message's media. Web page previews are handled separately."""
     file = msg.file
@@ -97,12 +128,13 @@ def media_from_message(msg: Any) -> Media | None:
             "height": file.height,
         }
     if msg.photo is not None:
-        return Media("photo", _file_key("photo", msg.photo), **common, has_thumb=True)
+        return Media("photo", _file_key("photo", msg.photo), **common, has_thumb=True, ref=media_ref(msg.photo))
     if msg.sticker is not None:
         mime = file.mime_type if file else ""
         fmt = "animated" if mime == "application/x-tgsticker" else "video" if mime == "video/webm" else "static"
         return Media("sticker", _file_key("document", msg.document), **common, emoji=file.emoji if file else None,
-                     sticker_format=fmt, has_thumb=bool(msg.document.thumbs))
+                     sticker_format=fmt, has_thumb=best_thumb(msg.document) is not None,
+                     ref=media_ref(msg.document), sticker_set=_sticker_set(msg.document))
     if msg.document is not None:
         document = msg.document
         if msg.gif is not None:
@@ -118,7 +150,8 @@ def media_from_message(msg: Any) -> Media | None:
         else:
             kind = "document"
         return Media(kind, _file_key("document", document), **common, title=file.title if file else None,
-                     performer=file.performer if file else None, has_thumb=bool(document.thumbs))
+                     performer=file.performer if file else None, has_thumb=best_thumb(document) is not None,
+                     ref=media_ref(document))
     if msg.poll is not None:
         poll = msg.poll.poll
         question = getattr(poll.question, "text", poll.question)

@@ -26,9 +26,12 @@ def drop_reason(message: Message, me: Peer, settings: InboundSection) -> str | N
     """Why ``message`` should not reach MaiBot, or ``None`` to keep it."""
     if message.chat.is_channel:
         return "broadcast channel"
-    if message.outgoing or (message.sender is not None and message.sender.id == me.id):
+    # Telethon never dispatches updates caused by our own requests, so "own" messages were typed by
+    # a human on another device logged into the same (user) account.
+    own = message.outgoing or (message.sender is not None and message.sender.id == me.id)
+    if own and settings.own_messages == "drop":
         return "own message"
-    if settings.ignore_bot_messages and message.sender is not None and message.sender.is_bot:
+    if not own and settings.ignore_bot_messages and message.sender is not None and message.sender.is_bot:
         return "bot sender"
     if settings.command_filter != "off":
         is_command, addressed = command_target(message.text)
