@@ -6,6 +6,8 @@
 * Typing (R9) holds a chat's queue.
 * History polling (R11), for bots by default, re-reads recent messages to find edits and
   deletions; those only update MaiBot's context and never trigger a reply (R11.2).
+* Reactions (R20) become notices or context lines, depending on ``inbound.reactions``.
+* Button presses (R29) are dropped unless their data matches a registered pattern.
 """
 
 from __future__ import annotations
@@ -13,23 +15,26 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any
 
 from ..backend.client import TelegramBackend
-from ..backend.models import Message, Peer
+from ..backend.models import CallbackPress, Message, Peer, ReactionChange
 from ..config import TelegramFullConfig
-from ..constants import GATEWAY_NAME, PLATFORM
-from ..ids import encode_group_id
+from ..constants import GATEWAY_NAME
 from ..store import Store
+from ..streams import StreamResolver
 from .codec import InboundCodec, sender_identity
 from .dispatcher import Debouncer, Dispatcher, Item, Notice
 from .filters import drop_reason
 
 POLICY_CACHE_SECONDS = 300
-_STREAM_CACHE_SECONDS = 600
 _POLL_WINDOW_SECONDS = 3600
+_CALLBACK_EXACT_KEY = "callback_exact"  # button data -> label, for buttons MaiBot sent
+_CALLBACK_PATTERNS_KEY = "callback_patterns"  # regexes registered by other plugins
+_MAX_EXACT_CALLBACKS = 500
 _STACKABLE_REASONS = ("command", "command for another bot")
 
 
@@ -42,6 +47,7 @@ class InboundPipeline:
         backend: TelegramBackend,
         store: Store,
         codec: InboundCodec,
+        streams: StreamResolver,
         config: Callable[[], TelegramFullConfig],
         logger: logging.Logger,
     ) -> None:
@@ -50,12 +56,12 @@ class InboundPipeline:
         self.backend = backend
         self.store = store
         self.codec = codec
+        self.streams = streams
         self.config = config
         self.logger = logger
         self.dispatcher = Dispatcher(lambda: config().dispatch, self._deliver, logger)
         self.edits = Debouncer(lambda: config().dispatch.edit_debounce, self._edit_settled)
         self._blocked_until: dict[int, float] = {}  # chat id -> monotonic deadline
-        self._streams: dict[tuple[int, int | None], tuple[str, float]] = {}
         self._poll_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -145,6 +151,87 @@ class InboundPipeline:
         if user_id != self.me.id:
             self.dispatcher.typing(chat_id, user_id, active)
 
+    async def on_reaction(self, change: ReactionChange) -> None:
+        mode = self.config().inbound.reactions
+        if mode == "off" or (change.actor is not None and change.actor.id == self.me.id):
+            return
+        meta = await self.store.get_message_meta(change.chat_id, change.msg_id)
+        if meta is None or not meta["routed"]:
+            return  # a message MaiBot never saw
+        own = bool(meta["is_outgoing"]) or meta["sender_id"] == self.me.id
+        actor = change.actor.name if change.actor is not None else "有人"
+        target = "你的消息" if own else f"{meta['sender_name'] or '某人'}的消息"
+        quoted = f"「{meta['text']}」" if meta["text"] else ""
+        how = "长按大表情（强烈情绪）" if change.big else ""
+        text = f"{actor}{how}回应了{target}{quoted}: {change.emoji}"
+        if mode == "notice" or (mode == "smart" and (own or change.big)):
+            peer = await self.backend.peer(change.chat_id)
+            if peer is None:
+                return
+            notice = Notice(
+                chat=peer, topic_id=meta["topic_id"],
+                actor_id=str(change.actor.id) if change.actor else str(change.chat_id), actor_name=actor, text=text,
+                key=f"{change.chat_id}:{change.msg_id}:reaction:{change.actor.id if change.actor else 0}:{change.emoji}",
+            )
+            self.dispatcher.add(Item(change.chat_id, notice=notice, urgent=own))
+        else:
+            await self.append_context(change.chat_id, meta["topic_id"], f"[表情回应] {text}")
+
+    # ---- button callbacks (R29) --------------------------------------------------------
+
+    async def register_callbacks(self, *, exact: dict[str, str] | None = None, pattern: str | None = None) -> None:
+        """Accept presses of buttons with this exact data (buttons MaiBot sent) or matching ``pattern``."""
+        if exact:
+            known = await self.store.get_json(_CALLBACK_EXACT_KEY, {})
+            known.update(exact)
+            if len(known) > _MAX_EXACT_CALLBACKS:
+                known = dict(list(known.items())[-_MAX_EXACT_CALLBACKS:])
+            await self.store.set_json(_CALLBACK_EXACT_KEY, known)
+        if pattern is not None:
+            re.compile(pattern)  # reject invalid patterns early
+            patterns = await self.store.get_json(_CALLBACK_PATTERNS_KEY, [])
+            if pattern not in patterns:
+                await self.store.set_json(_CALLBACK_PATTERNS_KEY, [*patterns, pattern])
+
+    async def unregister_callback_pattern(self, pattern: str) -> bool:
+        patterns = await self.store.get_json(_CALLBACK_PATTERNS_KEY, [])
+        if pattern not in patterns:
+            return False
+        await self.store.set_json(_CALLBACK_PATTERNS_KEY, [p for p in patterns if p != pattern])
+        return True
+
+    async def callback_patterns(self) -> list[str]:
+        return [*self.config().inbound.callback_patterns, *await self.store.get_json(_CALLBACK_PATTERNS_KEY, [])]
+
+    async def _accepts_callback(self, data: str) -> str | None:
+        """The label to show for an accepted press, or ``None`` to drop it."""
+        exact = await self.store.get_json(_CALLBACK_EXACT_KEY, {})
+        if data in exact:
+            return exact[data]
+        for pattern in await self.callback_patterns():
+            try:
+                if re.search(pattern, data):
+                    return data
+            except re.error:
+                self.logger.warning("Invalid callback pattern ignored: %r", pattern)
+        return None
+
+    async def on_callback(self, press: CallbackPress) -> None:
+        accepted = await self._accepts_callback(press.data)
+        if accepted is None or self._blocked(press.chat.id):
+            self.logger.debug("Dropped button press %r in chat %s", press.data, press.chat.id)
+            return
+        label = press.label or accepted
+        user_id = str(press.sender.id) if press.sender else str(press.chat.id)
+        name = press.sender.name if press.sender else "某人"
+        suffix = f"（数据: {press.data}）" if press.data != label else ""
+        notice = Notice(
+            chat=press.chat, topic_id=None, actor_id=user_id, actor_name=name,
+            text=f"[点击了按钮「{label}」{suffix}]", key=f"{press.chat.id}:{press.msg_id}:press:{press.query_id}",
+            is_notify=False,  # a user action aimed at us: an ordinary message that can get a reply
+        )
+        self.dispatcher.add(Item(press.chat.id, notice=notice, urgent=True))
+
     def _author(self, meta: dict[str, Any]) -> str:
         if meta["is_outgoing"] or meta["sender_id"] == self.me.id:
             return "你"
@@ -208,31 +295,9 @@ class InboundPipeline:
             self.logger.debug("MaiBot did not accept %s: %s", message_id, result)
         return False
 
-    async def _stream_id(self, chat_id: int, topic_id: int | None) -> str | None:
-        """MaiBot's chat stream (session) id for a Telegram chat of this account."""
-        key = (chat_id, topic_id)
-        cached = self._streams.get(key)
-        if cached is not None and cached[1] > time.monotonic():
-            return cached[0]
-        streams = await self.ctx.chat.get_all_streams(PLATFORM)
-        group_id = encode_group_id(chat_id, topic_id)
-        found = None
-        for stream in streams if isinstance(streams, list) else []:
-            if not isinstance(stream, dict) or str(stream.get("account_id") or "") not in ("", str(self.me.id)):
-                continue
-            if chat_id < 0 and str(stream.get("group_id")) == group_id:
-                found = str(stream.get("stream_id") or stream.get("session_id"))
-                break
-            if chat_id > 0 and not stream.get("is_group_session") and str(stream.get("user_id")) == str(chat_id):
-                found = str(stream.get("stream_id") or stream.get("session_id"))
-                break
-        if found:
-            self._streams[key] = (found, time.monotonic() + _STREAM_CACHE_SECONDS)
-        return found
-
     async def append_context(self, chat_id: int, topic_id: int | None, text: str) -> bool:
         """Add a line to MaiBot's context for a chat without triggering a reply (not persisted)."""
-        stream_id = await self._stream_id(chat_id, topic_id)
+        stream_id = await self.streams.stream_for_chat(chat_id, topic_id)
         if stream_id is None:
             self.logger.debug("No MaiBot stream for chat %s; context update dropped", chat_id)
             return False

@@ -54,13 +54,14 @@ def check_length(text: str, soft_limit: int, hard_limit: int = MAX_MESSAGE_LENGT
     if units > hard_limit:
         raise TextTooLongError(
             f"Text is too long for one Telegram message ({units} > {hard_limit} UTF-16 units). "
-            "Split it into several shorter messages, or publish it with the Telegraph tool and send the link."
+            "Split it into several shorter messages, or publish it with the telegram_post_long_text tool "
+            "(Telegra.ph; public and permanent) and send the link."
         )
     if soft_limit > 0:
         width = display_width(text)
         if width > soft_limit:
             return (
                 f"Long message (display width {width} > {soft_limit}). Consider splitting it, "
-                "or publishing it to Telegraph and sending a link with a short summary."
+                "or publishing it with the telegram_post_long_text tool (Telegra.ph) and sending the link."
             )
     return None

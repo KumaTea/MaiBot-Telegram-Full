@@ -42,6 +42,7 @@ class Notice:
     actor_name: str
     text: str
     key: str  # unique and stable, used for the message id and de-duplication
+    is_notify: bool = True  # False for user actions aimed at us, such as button presses
 
 
 @dataclass

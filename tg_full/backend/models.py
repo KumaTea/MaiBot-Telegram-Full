@@ -80,6 +80,29 @@ class Media:
     sticker_set: tuple[int, int] | None = None  # (id, access_hash)
 
 
+@dataclass(frozen=True)
+class ReactionChange:
+    """Someone added a reaction to a message."""
+
+    chat_id: int
+    msg_id: int
+    emoji: str  # the emoji, "[自定义表情]" for custom emoji, "⭐" for paid reactions
+    actor: Peer | None = None  # None when Telegram only reports counts
+    big: bool = False  # sent with the long-press "big" animation (user accounts can see this)
+
+
+@dataclass(frozen=True)
+class CallbackPress:
+    """A user pressed an inline keyboard button of one of our messages (bot accounts only)."""
+
+    query_id: int
+    chat: Peer
+    msg_id: int
+    data: str
+    sender: Peer | None
+    label: str | None = None  # button text, when it could be read from the message
+
+
 @dataclass
 class Message:
     chat: Peer

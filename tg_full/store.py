@@ -246,6 +246,28 @@ class Store:
         )
         return dict(zip(MEDIA_COLUMNS, row, strict=True)) if row else None
 
+    async def media_by_key(self, file_key: str) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            f"SELECT {', '.join(MEDIA_COLUMNS)} FROM media WHERE file_key = ? ORDER BY updated DESC LIMIT 1",
+            (file_key,),
+        )
+        return dict(zip(MEDIA_COLUMNS, row, strict=True)) if row else None
+
+    async def recent_stickers(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Stickers seen recently, newest first, one row per sticker."""
+        rows = await self.fetchall(
+            f"SELECT {', '.join(MEDIA_COLUMNS)} FROM media WHERE kind = 'sticker' ORDER BY updated DESC LIMIT ?",
+            (limit,),
+        )
+        seen: set[str] = set()
+        result = []
+        for row in rows:
+            record = dict(zip(MEDIA_COLUMNS, row, strict=True))
+            if record["file_key"] not in seen:
+                seen.add(record["file_key"])
+                result.append(record)
+        return result
+
     async def update_file_reference(self, file_key: str, file_reference: bytes) -> None:
         await self.execute(
             "UPDATE media SET file_reference = ?, updated = ? WHERE file_key = ?",

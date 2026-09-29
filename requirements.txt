@@ -1,0 +1,9 @@
+# MaiBot installs these automatically from _manifest.json; this file is for manual installs.
+telethon>=1.45,<2
+cryptg>=0.4
+markdown-it-py>=3.0
+python-socks>=2.4
+Pillow>=9.0
+aiohttp>=3.8
+# Optional, only for media.animation = "gif" (the adapter can install it itself, see media.install_pyav):
+# av>=12

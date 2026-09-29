@@ -7,10 +7,11 @@
     "name": "KumaTea",
     "url": "https://github.com/KumaTea"
   },
-  "license": "AGPL-3.0-or-later",
+  "license": "GPL-3.0-or-later",
   "urls": {
     "repository": "https://github.com/KumaTea/MaiBot-Telegram-Full",
     "homepage": "https://github.com/KumaTea/MaiBot-Telegram-Full",
+    "documentation": "https://github.com/KumaTea/MaiBot-Telegram-Full/blob/main/README.md",
     "issues": "https://github.com/KumaTea/MaiBot-Telegram-Full/issues"
   },
   "host_application": {
@@ -25,7 +26,7 @@
     {
       "type": "python_package",
       "name": "telethon",
-      "version_spec": ">=1.40,<2"
+      "version_spec": ">=1.45,<2"
     },
     {
       "type": "python_package",
@@ -56,7 +57,9 @@
   "capabilities": [
     "database.get",
     "chat.get_all_streams",
-    "maisaka.context.append"
+    "maisaka.context.append",
+    "component.enable",
+    "component.disable"
   ],
   "i18n": {
     "default_locale": "zh-CN",
@@ -66,5 +69,13 @@
     ]
   },
   "id": "kumatea.telegram-full",
-  "plugin_type": "adapter"
+  "plugin_type": "adapter",
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "send",
+      "background": "#229ED9"
+    }
+  },
+  "changelog": "CHANGELOG.md"
 }

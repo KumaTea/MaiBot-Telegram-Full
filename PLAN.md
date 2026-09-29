@@ -9,7 +9,7 @@ Reference versions checked on 2026-09-29:
 |---|---|---|
 | MaiBot (test container `maim-bot-core` on 10.3.3.5) | 1.2.5 | Python 3.13, Debian 13, no ffmpeg |
 | maibot-plugin-sdk | 2.8.1 in container, 2.8.2 upstream | manifest v2 |
-| Telethon v1 | 1.45.0 (PyPI) | current layer has everything below |
+| Telethon v1 | 1.45.0 (PyPI), **required ≥ 1.45** | layer 229 restructured inline keyboards (`KeyboardInlineButton`); everything else the backend uses exists since 1.40 |
 | Telethon v2 | unreleased | only a `v2` git branch; needs Rust + maturin to build, Python ≥ 3.12 |
 
 ---
@@ -27,6 +27,10 @@ narrows or corrects a requirement.
 - **[R3] Dependencies:** manifest `dependencies: [{"type": "python_package", "name": "telethon",
   "version_spec": ">=1.40,<2"}]`. The Host installs missing packages with `uv pip`, so users don't
   run pip themselves.
+- **[R3] Telethon version:** `>=1.45,<2`. Layer 229 (Telethon 1.45.0) replaced
+  `KeyboardButtonCallback` / `KeyboardButtonRow` with `KeyboardInlineButton` +
+  `InlineButtonType*`. Checked against the 1.40–1.45 wheels. A test asserts that every
+  `types.*` / `functions.*` / `errors.*` name the backend uses exists in the installed Telethon.
 - **[R3] Telethon's optional packages:**
   - `cryptg` is declared as a **hard dependency**. It is about 60× faster than Telethon's libssl
     fallback (4 ms vs 262 ms per MiB of AES-IGE, measured), and every MTProto byte is encrypted.
@@ -308,7 +312,7 @@ As built:
   natively, a GIF arrives as a static image (or as a GIF in `gif` mode), and a link without a
   Telegram preview gets a fetched summary.
 
-### Phase 4: Inbound dispatcher ([R7], [R8], [R9], [R10], [R11], [R12], [R13]) — code deployed, live test pending
+### Phase 4: Inbound dispatcher ([R7], [R8], [R9], [R10], [R11], [R12], [R13]) — ✅ done 2026-09-30 (bot polling verified by tests only)
 **Spike results** (MaiBot 1.2.5):
 - `is_notify` messages run the full receive chain and enter Maisaka's message cache. They count as
   pending external messages in its 读空气 score, and a new message can interrupt a running planner.
@@ -352,53 +356,107 @@ As built:
 - **Done when:** a burst of messages or edits produces one dispatch, and polling surfaces an edit made
   on another client without producing a reply.
 
-### Phase 5: Interaction ([R14], [R19], [R20], [R21], [R29])
-- Typing indicator: planner hook → `SetTyping` once per planning round, no refresh loop [R19].
-- Reactions:
-  - inbound, including big-reaction detection for userbots, as notices or context
-  - outbound through a Tool (`telegram_react`, with a `big` option) [R20]
-- Quote policy [R21]:
-  - the core decides whether to quote (reply component / `set_reply`), matching the original adapter
-  - adapter overrides: `always` / `core` / `never`, plus a toggle to never quote bot messages
-  - also exposed as a Tool argument
-- Bots [R14]:
-  - method 2, the default, strips the quote when the target is a bot
-  - method 1 drops the reply altogether, not recommended
-- Callbacks [R29]: dropped by default. An API and Tool (`register_callback_pattern(regex)`) turn
-  matching callback data into inbound messages. Includes a Tool to send inline keyboards, since the
-  core needs a way to create buttons in the first place.
-- **Done when:** "typing…" appears once while MaiBot plans, reactions work both ways, a registered
-  button press reaches the core.
+### Phase 5: Interaction ([R14], [R19], [R20], [R21], [R29]) — ✅ done 2026-09-30
+As built:
+- **Typing indicator [R19]:**
+  - an OBSERVE hook on `maisaka.replyer.before_request`: when MaiBot starts generating a reply
+    (attempt 1), send `SetTyping` once, with no refresh loop (`outbound.typing_indicator`)
+  - The planner hook was rejected on purpose. It would show "typing…" on every planning round,
+    even when MaiBot decides not to reply, and it ships the whole prompt context on each call.
+- **Reactions in [R20]** (`inbound.reactions`, default `smart`):
+  - reactions on the account's own messages, and long-press "big" reactions, become notices (may
+    trigger a reply); others become context lines. `off` / `context` / `notice` are also available.
+  - user accounts: the latest reactors from `UpdateMessageReactions` (entries newer than 2 minutes
+    and not seen before, including the `big` flag); counts when Telegram hides who reacted
+  - bots: `UpdateBotMessageReaction` (the bot must be an admin), with no `big` flag
+  - only for messages MaiBot has seen
+- **Reactions out [R20]:** Tool `telegram_react(msg_id, emoji, big)` (visible) and API `react`.
+  Rejected emoji return the list of standard reactions.
+- **Quote control [R14, R21]:** already native. MaiBot's `reply` tool has `set_quote`; the adapter
+  honours it, with the overrides `outbound.quote_policy = never` and `outbound.reply_to_bots`.
+  No extra tool needed.
+- **Buttons [R29]** (bot accounts only):
+  - Tool `telegram_send_buttons(text, buttons)` (deferred) and API `send_buttons`; data of buttons
+    MaiBot sends is registered automatically
+  - other presses are accepted only when their data matches `inbound.callback_patterns` or a
+    pattern registered through API `register_callback_pattern` (`""` accepts all)
+  - accepted presses reach MaiBot as an ordinary message "[点击了按钮「label」]" (not a notice), so
+    MaiBot can answer; every press is answered so the button stops spinning
+- `streams.py`: MaiBot stream ↔ Telegram chat mapping (filtered by account), shared by tools, hooks
+  and context updates
+- **Done when:** "typing…" appears once while MaiBot generates, reactions work both ways, and a
+  registered button press reaches the core.
 
-### Phase 6: Capabilities exposed to the core ([R4], [R4.1], [R4.2])
-- **Tools (for the LLM):** a small, safe set, mostly from phases 3–5.
-  - `find_stickers` (by emoji, from the Phase 3 index), `send_sticker`, `react`, `send_with_buttons`,
-    `post_telegraph`, `get_message`
-  - each description is short and states risks where there are any
-- **APIs (for other plugins):** the same operations, plus `get_chat_info` and `resolve_stream`.
-- **Raw invoke (`telegram_raw_invoke`):**
-  - **disabled by default**; enabled with `features.raw_api.enabled` plus an allow-list or deny-list of
-    TL method names (defaults deny `auth.*`, `account.*`, `payments.*` and deletions)
-  - input is a TL method name such as `messages.GetHistoryRequest` or `messages.getHistory`, plus JSON
-    params
-  - the adapter resolves the class in `telethon.tl.functions`, converts peer-like params with
-    `get_input_entity`, validates the arguments against the constructor, runs it, and returns
-    `to_dict()` (made JSON-safe)
-  - the Tool description tells the agent this is risky and to check the Telethon/TL docs
-    (tl.telethon.dev) first
-- The manifest `capabilities` list declares every Host capability the plugin uses.
+### Phase 6: Capabilities exposed to the core ([R4], [R4.1], [R4.2]) — ✅ done 2026-09-30
+As built. Tools are for the LLM; APIs are for other plugins, called as `kumatea.telegram-full.<name>`.
+
+| Tool | API | What it does |
+|---|---|---|
+| `telegram_react` (visible) | `react` | reaction on a message (Phase 5) |
+| `telegram_send_buttons` (deferred) | `send_buttons` | inline keyboard, bots only (Phase 5) |
+| `telegram_find_stickers` (deferred) | `find_stickers` | stickers seen in chats, by emoji, with MaiBot's descriptions |
+| `telegram_send_sticker` (deferred) | `send_sticker` | resend a known sticker natively by reference |
+| `telegram_get_message` (deferred) | `get_message` | read one message (text, sender, time, reply target), e.g. an old quoted one |
+| `telegram_chat_info` (deferred) | `get_chat_info` | title, type, username, member count, description |
+| `telegram_raw_api` (deferred, **off**) | `raw_invoke` | any MTProto method [R4.1, R4.2] |
+| — | `register_callback_pattern` / `unregister_callback_pattern` | button callbacks (Phase 5) |
+
+- **Raw MTProto** (`backend/raw_api.py`, config section `advanced` / 高级):
+  - off by default. The SDK always registers tools as enabled, so the plugin disables the tool
+    via `component.disable` on every load and config change, and `raw_invoke` refuses while
+    `advanced.raw_api_enabled` is off. The LLM only sees the tool while the switch is on.
+  - input: TL method name (`messages.getHistory`, `messages.GetHistoryRequest`, …) plus JSON params
+    (snake_case or camelCase; nested TL objects as `{"_": "Type", …}` like Telethon's `to_dict()`;
+    `"$chat"` means the current chat). Telethon resolves peers given by id or username.
+  - allow / deny glob lists on the canonical name. The default deny list covers auth, account,
+    payments, phone and sticker-set management, deletes, leaves, reports, blocks and
+    admin/ban/creator edits.
+  - result: JSON-safe `to_dict()` (bytes as base64, dates ISO), truncated to
+    `raw_api_max_result_chars`. Every call is logged at WARNING level as an audit trail.
+  - the tool description tells the LLM it is high-risk and to check https://tl.telethon.dev first
+- New capabilities: `component.enable`, `component.disable`.
 - **Done when:** the tools show up in MaiBot's tool list; raw invoke is refused when off and works for
   a harmless read call when on.
 
-### Phase 7: Long text ([R26.1], [R26.2], [R26.3])
-- Telegraph client:
-  - create the account once and store its token in the store
-  - markdown → Telegraph node JSON, limited to the allowed tags
-  - `post_telegraph` Tool/API; its description says posts are **public, permanent and can't be
-    edited**
-- Link + short summary:
-  - default is an extractive summary (first paragraph, truncated); no LLM keys
-  - optional experimental `messages.summarizeText` for user accounts
+### Phase 7: Long text ([R26.1], [R26.2], [R26.3]) — ✅ done 2026-09-30 (AI-summary success path awaits the quota reset; fallback verified)
+As built (`outbound/telegraph.py`):
+- **Corrections to the requirement text:**
+  - Telegraph pages *can* be edited (`editPage` with the creating account's token), but not
+    deleted. Implemented:
+    - every published page is recorded with the token that created it
+    - Tool `telegram_edit_long_text(page, markdown, title, clear)` (deferred; the post tool's
+      description and result point to it) and APIs `edit_long_text` / `list_long_texts`
+    - `clear=true` overwrites title and body with a placeholder ("（已清空）"), the closest thing to
+      deleting
+    - pages published before tracking are tried with the current account; Telegraph refuses
+      other accounts' pages (`PAGE_ACCESS_DENIED`), and the error lists the editable pages
+  - **Cocoon AI summary** (`messages.summarizeText(peer, id)`), tested 2026-09-30 from @Kuma_AI
+    (not Premium):
+    - it summarizes the *message text*; a link-only message gets a summary of the placeholder
+      itself ("The message is a placeholder … link to a Telegra.ph article …"), not of the article
+    - summaries for new messages come back immediately. A cached one stays in the API after the
+      linked page changes, although the app then hides it.
+    - the non-Premium quota is tiny: `SUMMARY_FLOOD_PREMIUM` (406) after about 5 calls
+- **Chat message:**
+  - bots always send `outbound.long_text_notice` ("消息过长，点击查看：") plus the link; no excerpt
+  - user accounts with `outbound.long_text_ai_summary` (default on): the article's first ≤4000
+    UTF-16 units go to the account's Saved Messages, `summarizeText` is called once (with
+    `to_lang=zh` for Chinese text), the temporary message is deleted, and the chat gets
+    "summary + link"
+  - quota used up or any failure falls back to the notice
+- **Tool `telegram_post_long_text(title, markdown)`** (visible, because the "too long" error names
+  it) and **API `post_long_text`**:
+  - publishes the page, then sends the notice or AI summary plus the link (link preview on, so
+    Telegram shows Instant View)
+  - the API can also return just the link (`send_link=False` or no `stream_id`) [R26.2]
+- **Account [R26.1]:** created once on first use and stored. Author name and link default to
+  the account's name and t.me link (`outbound.telegraph_author_*`). An invalid token triggers one
+  re-creation.
+- **Content:** the same markdown parser as messages, with single newlines as `<br>`, mapped to
+  Telegraph's tags (headings → h3/h4, tables → `a | b` lines, spoilers → plain text,
+  unsupported tags unwrapped). LaTeX is converted as in messages. 64 KB limit checked.
+- Messages over 4096 are still refused (as required); the error and the >1000 warning now name
+  the tool.
 - **Done when:** a 5000-character reply is refused with guidance, and posting it to Telegraph returns
   a link plus a summary.
 

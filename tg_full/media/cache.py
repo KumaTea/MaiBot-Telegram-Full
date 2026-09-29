@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..backend.models import Media, MediaRef
+from ..backend.models import Media
 from ..store import Store
 
 # MaiBot's own rendering of recognized media (src/chat/message_receive/message.py).
@@ -91,10 +91,3 @@ class MediaCache:
             "set_id": media.sticker_set[0] if media.sticker_set else None,
             "set_access_hash": media.sticker_set[1] if media.sticker_set else None,
         })
-
-    async def ref_for_hash(self, sha256: str) -> tuple[MediaRef, dict[str, Any]] | None:
-        row = await self.store.media_by_sha(sha256)
-        if row is None:
-            return None
-        ref = MediaRef(row["ref_type"], row["media_id"], row["access_hash"], bytes(row["file_reference"]))
-        return ref, row

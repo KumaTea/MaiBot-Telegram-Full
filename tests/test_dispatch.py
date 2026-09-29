@@ -11,6 +11,7 @@ from tg_full.inbound.codec import InboundCodec
 from tg_full.inbound.dispatcher import ChatState, Debouncer, Dispatcher, Item, adaptive_threshold, next_action
 from tg_full.inbound.pipeline import InboundPipeline
 from tg_full.store import Store
+from tg_full.streams import StreamResolver
 
 LOG = logging.getLogger("test")
 
@@ -181,7 +182,7 @@ async def make_pipeline(tmp_path, dispatch=None, polled=None):
     config = TelegramFullConfig(dispatch=dispatch or DispatchSection(edit_debounce=0.05))
     host = FakeHost()
     pipeline = InboundPipeline(ctx=host, me=ME, backend=FakeBackend(polled), store=store, codec=codec,
-                               config=lambda: config, logger=LOG)
+                               streams=StreamResolver(host, ME), config=lambda: config, logger=LOG)
     return pipeline, host, store
 
 

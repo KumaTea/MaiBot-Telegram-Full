@@ -574,7 +574,7 @@ requires-dist = [
     { name = "markdown-it-py", specifier = ">=3.0" },
     { name = "pillow", specifier = ">=9.0" },
     { name = "python-socks", specifier = ">=2.4" },
-    { name = "telethon", specifier = ">=1.40,<2" },
+    { name = "telethon", specifier = ">=1.45,<2" },
 ]
 
 [package.metadata.requires-dev]

@@ -9,7 +9,7 @@ from typing import Any
 from ..backend.client import TelegramBackend
 from ..backend.models import MediaRef
 from ..config import MediaSection, OutboundSection
-from ..ids import encode_message_id
+from ..ids import ChatTarget, encode_message_id
 from ..media.cache import MediaCache
 from ..store import Store
 from .codec import OutboundError, OutItem, SendPlan, build_plan
@@ -53,10 +53,18 @@ class OutboundSender:
         """Resend a Telegram file MaiBot got from us (e.g. a collected sticker) by reference."""
         if self.cache is None or not item.source_hash or not self.media_settings().native_resend:
             return None
-        found = await self.cache.ref_for_hash(item.source_hash)
-        if found is None:
+        row = await self.store.media_by_sha(item.source_hash)
+        if row is None:
             return None
-        ref, row = found
+        try:
+            return await self.send_known(plan.target, row, reply_to)
+        except Exception as exc:
+            self.logger.info("Native resend of %s failed (%r); uploading instead", row["file_key"], exc)
+            return None
+
+    async def send_known(self, target: ChatTarget, row: dict[str, Any], reply_to: int | None = None) -> int:
+        """Send a Telegram file from the media store by reference, refreshing an expired reference."""
+        ref = MediaRef(row["ref_type"], row["media_id"], row["access_hash"], bytes(row["file_reference"]))
 
         async def refresh() -> MediaRef | None:
             if row["origin_chat"] is None or row["origin_msg"] is None:
@@ -67,11 +75,13 @@ class OutboundSender:
             await self.store.update_file_reference(row["file_key"], fresh.file_reference)
             return fresh
 
-        try:
-            return await self.backend.send_ref(plan.target, ref, reply_to=reply_to, refresh=refresh)
-        except Exception as exc:
-            self.logger.info("Native resend of %s failed (%r); uploading instead", row["file_key"], exc)
-            return None
+        msg_id = await self.backend.send_ref(target, ref, reply_to=reply_to, refresh=refresh)
+        me = self.backend.me
+        await self.store.record_message(
+            target.chat_id, msg_id, me.id if me else None, bool(me and me.is_bot),
+            is_outgoing=True, routed=True, topic_id=target.topic_id, text=f"[{row['kind']}]",
+        )
+        return msg_id
 
     async def _send_item(self, plan: SendPlan, item: OutItem, reply_to: int | None) -> int:
         if item.kind != "text":

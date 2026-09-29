@@ -391,7 +391,7 @@ class InboundCodec:
             "is_emoji": False,
             "is_picture": False,
             "is_command": False,
-            "is_notify": True,
+            "is_notify": notice.is_notify,
             "processed_plain_text": notice.text,
         }
 

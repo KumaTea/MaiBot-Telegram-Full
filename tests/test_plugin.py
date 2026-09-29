@@ -47,3 +47,21 @@ async def test_store_roundtrip(tmp_path):
     await store.open()
     assert await store.get_json("k") == {"a": 1}
     await store.close()
+
+
+def test_backend_only_uses_names_that_exist_in_installed_telethon():
+    """Guards against Telegram layer changes (e.g. KeyboardButtonCallback vanished in layer 229)."""
+    import re
+
+    import telethon.tl.functions as tl_functions
+    import telethon.tl.types as tl_types
+    from telethon import errors
+
+    for source in (ROOT / "tg_full" / "backend").glob("*.py"):
+        text = source.read_text(encoding="utf-8")
+        for name in re.findall(r"\btypes\.([A-Z]\w+)", text):
+            assert hasattr(tl_types, name), f"{source.name}: types.{name}"
+        for module, name in re.findall(r"\bfunctions\.(\w+)\.(\w+)", text):
+            assert hasattr(getattr(tl_functions, module), name), f"{source.name}: functions.{module}.{name}"
+        for name in re.findall(r"\berrors\.([A-Z]\w+)", text):
+            assert hasattr(errors, name), f"{source.name}: errors.{name}"

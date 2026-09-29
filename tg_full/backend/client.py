@@ -3,30 +3,61 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import mimetypes
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from telethon import TelegramClient, errors, events, functions, types, utils
+from telethon import Button, TelegramClient, errors, events, functions, types, utils
 
 from ..ids import ChatTarget
 from ..text.entities import Entity
 from .convert import best_thumb, media_ref, message_from_tl, peer_from_entity
-from .models import MediaRef, Message, Peer
+from .models import CallbackPress, MediaRef, Message, Peer, ReactionChange
 
 MessageCallback = Callable[[Message], Awaitable[None]]
 CodeProvider = Callable[[], Awaitable[str]]
 RefRefresher = Callable[[], Awaitable["MediaRef | None"]]
 DeletionCallback = Callable[["int | None", list[int]], Awaitable[None]]
+ReactionCallback = Callable[[ReactionChange], Awaitable[None]]
+PressCallback = Callable[[CallbackPress], Awaitable[None]]
+_RECENT_REACTION_SECONDS = 120
 TypingCallback = Callable[[int, int, bool], Awaitable[None]]
 
 
 class LoginError(RuntimeError):
     """Login cannot proceed without the user changing the configuration."""
+
+
+def inline_markup(rows: Sequence[Sequence[dict[str, str]]]) -> types.ReplyInlineMarkup:
+    """Inline keyboard from ``{"text", "data"}`` / ``{"text", "url"}`` rows.
+
+    Built with Telethon's ``Button`` helpers, which track Telegram layer changes (layer 2xx replaced
+    ``KeyboardButtonCallback`` with ``KeyboardInlineButton`` + ``InlineButtonTypeCallback``).
+    """
+    return types.ReplyInlineMarkup([
+        types.KeyboardInlineButtonRow([
+            Button.url(b["text"], b["url"]) if b.get("url")
+            else Button.inline(b["text"], str(b.get("data") or b["text"]).encode()[:64])
+            for b in row
+        ])
+        for row in rows
+    ])
+
+
+def _reaction_text(reaction: Any) -> str:
+    if isinstance(reaction, types.ReactionEmoji):
+        return reaction.emoticon
+    if isinstance(reaction, types.ReactionCustomEmoji):
+        return "[自定义表情]"
+    if isinstance(reaction, types.ReactionPaid):
+        return "⭐"
+    return "[表情]"
 
 
 class RateLimitedError(RuntimeError):
@@ -67,6 +98,10 @@ _FATAL_LOGIN_ERRORS = (
     errors.PhoneNumberUnoccupiedError,
     errors.AuthKeyDuplicatedError,
 )
+
+# Telegram errors for a reply target that no longer exists. Telethon only has a class for
+# MSG_ID_INVALID; the others arrive as a plain BadRequestError carrying this message.
+_REPLY_TARGET_ERRORS = frozenset({"MSG_ID_INVALID", "REPLY_MESSAGE_ID_INVALID", "REPLY_TO_INVALID"})
 
 _TL_SIMPLE = {
     "bold": types.MessageEntityBold,
@@ -247,7 +282,113 @@ class TelegramBackend:
 
         self.client.add_event_handler(handler, events.UserUpdate())
 
-    # ---- sending -----------------------------------------------------------------------
+    def on_reactions(self, callback: ReactionCallback) -> None:
+        """Report newly added reactions.
+
+        * User accounts get ``UpdateMessageReactions`` with the latest reactors (including the
+          "big" flag); entries newer than two minutes and not seen before are reported. When
+          Telegram hides who reacted, increased counts are reported without an actor.
+        * Bots get ``UpdateBotMessageReaction`` (they must be admins) with old and new reactions.
+        """
+        seen: dict[tuple[int, int], set[tuple[Any, ...]]] = {}
+        counts: dict[tuple[int, int], dict[str, int]] = {}
+
+        async def emit(change: ReactionChange) -> None:
+            try:
+                await callback(change)
+            except Exception:
+                self.logger.exception("Failed to handle reaction in chat %s", change.chat_id)
+
+        async def handler(update: Any) -> None:
+            if isinstance(update, types.UpdateBotMessageReaction):
+                chat_id = utils.get_peer_id(update.peer)
+                old = {_reaction_text(r) for r in update.old_reactions}
+                actor = peer_from_entity(await self._entity_or_none(update.actor))
+                for reaction in update.new_reactions:
+                    if _reaction_text(reaction) not in old:
+                        await emit(ReactionChange(chat_id, update.msg_id, _reaction_text(reaction), actor))
+                return
+            if not isinstance(update, types.UpdateMessageReactions):
+                return
+            chat_id = utils.get_peer_id(update.peer)
+            key = (chat_id, update.msg_id)
+            if len(seen) > 2048:
+                seen.clear()
+                counts.clear()
+            recent = update.reactions.recent_reactions or []
+            if recent:
+                known = seen.setdefault(key, set())
+                cutoff = time.time() - _RECENT_REACTION_SECONDS
+                for entry in recent:
+                    marker = (utils.get_peer_id(entry.peer_id), _reaction_text(entry.reaction), entry.date)
+                    if entry.my or marker in known or entry.date.timestamp() < cutoff:
+                        known.add(marker)
+                        continue
+                    known.add(marker)
+                    actor = peer_from_entity(await self._entity_or_none(entry.peer_id))
+                    await emit(ReactionChange(chat_id, update.msg_id, marker[1], actor, bool(entry.big)))
+                return
+            current = {_reaction_text(r.reaction): r.count for r in update.reactions.results}
+            previous = counts.get(key, {})
+            counts[key] = current
+            for emoji, count in current.items():
+                if count > previous.get(emoji, 0):
+                    await emit(ReactionChange(chat_id, update.msg_id, emoji))
+
+        self.client.add_event_handler(
+            handler, events.Raw(types=[types.UpdateMessageReactions, types.UpdateBotMessageReaction])
+        )
+
+    def on_callback(self, callback: PressCallback) -> None:
+        """Inline keyboard presses. Every press is answered so the button stops spinning."""
+
+        async def handler(event: events.CallbackQuery.Event) -> None:
+            try:
+                data = (event.data or b"").decode("utf-8", errors="replace")
+                label = None
+                with contextlib.suppress(Exception):
+                    message = await event.get_message()
+                    for row in (message.buttons or []) if message else []:
+                        for button in row:
+                            if getattr(button, "data", None) == event.data:
+                                label = button.text
+                chat = peer_from_entity(await event.get_chat())
+                if chat is not None:
+                    press = CallbackPress(
+                        event.id, chat, event.message_id, data, peer_from_entity(await event.get_sender()), label
+                    )
+                    await callback(press)
+            except Exception:
+                self.logger.exception("Failed to handle button press in chat %s", event.chat_id)
+            finally:
+                with contextlib.suppress(Exception):
+                    await event.answer()
+
+        self.client.add_event_handler(handler, events.CallbackQuery())
+
+    async def _entity_or_none(self, peer: Any) -> Any:
+        try:
+            return await self.client.get_entity(peer)
+        except (ValueError, errors.RPCError):
+            return None
+
+    # ---- sending ----------------------------------------------------------------------
+
+    async def set_typing(self, target: ChatTarget) -> None:
+        """Show "typing…" once; Telegram clears it after ~5 s or when our message arrives."""
+        peer = await self.client.get_input_entity(target.chat_id)
+        top = target.topic_id if target.topic_id not in (None, 1) else None
+        await self.client(functions.messages.SetTypingRequest(peer, types.SendMessageTypingAction(), top_msg_id=top))
+
+    async def send_reaction(self, chat_id: int, msg_id: int, emoji: str, big: bool = False) -> None:
+        peer = await self.client.get_input_entity(chat_id)
+        reaction = [types.ReactionEmoji(emoticon=emoji)] if emoji else []
+        try:
+            await self.client(functions.messages.SendReactionRequest(
+                peer=peer, msg_id=msg_id, reaction=reaction, big=big or None, add_to_recent=True
+            ))
+        except errors.FloodWaitError as exc:
+            raise RateLimitedError(exc.seconds) from exc
 
     @staticmethod
     def _reply_header(target: ChatTarget, reply_to: int | None) -> types.InputReplyToMessage | None:
@@ -282,9 +423,9 @@ class TelegramBackend:
         try:
             try:
                 result = await self.client(request)
-            except (errors.ReplyMessageIdInvalidError, errors.MsgIdInvalidError):
+            except errors.RPCError as exc:
                 fallback = self._reply_header(target, None)
-                if request.reply_to == fallback:
+                if exc.message not in _REPLY_TARGET_ERRORS or request.reply_to == fallback:
                     raise
                 request.reply_to = fallback  # the quoted message is gone; send without quoting
                 result = await self.client(request)
@@ -302,14 +443,18 @@ class TelegramBackend:
         entities: Sequence[Entity] = (),
         reply_to: int | None = None,
         link_preview: bool = False,
+        buttons: Sequence[Sequence[dict[str, str]]] | None = None,
     ) -> int:
+        """Send text. ``buttons`` rows of ``{"text", "data"}`` or ``{"text", "url"}`` need a bot account."""
         peer = await self.client.get_input_entity(target.chat_id)
+        markup = inline_markup(buttons) if buttons else None
         request = functions.messages.SendMessageRequest(
             peer=peer,
             message=text,
             reply_to=self._reply_header(target, reply_to),
             no_webpage=not link_preview,
             entities=await self._tl_entities(entities) or None,
+            reply_markup=markup,
         )
         return await self._send(request, peer, target)
 
@@ -426,6 +571,54 @@ class TelegramBackend:
         """Re-read messages by id (works for bots too). Deleted or inaccessible ones come back ``None``."""
         raws = await self.client.get_messages(chat_id, ids=list(ids))
         return [await message_from_tl(self.client, raw, resolve_reply=False) if raw is not None else None for raw in raws]
+
+    async def summarize_text(self, text: str, to_lang: str | None = None) -> str | None:
+        """Telegram's AI summary (Cocoon) of ``text``, for user accounts.
+
+        ``messages.summarizeText`` only works on an existing message, so the text is posted to the
+        account's own Saved Messages, summarized once and deleted again. Returns ``None`` when no
+        summary is available (quota used up, unsupported, …).
+        """
+        if self.me is None or self.me.is_bot:
+            return None
+        sent = await self.client.send_message("me", text, link_preview=False)
+        try:
+            result = await self.client(functions.messages.SummarizeTextRequest(
+                peer=types.InputPeerSelf(), id=sent.id, to_lang=to_lang
+            ))
+            return (result.text or "").strip() or None
+        except errors.RPCError as exc:
+            self.logger.info("No Telegram AI summary (%s)", exc.message or type(exc).__name__)
+            return None
+        finally:
+            with contextlib.suppress(Exception):
+                await self.client.delete_messages("me", [sent.id])
+
+    async def invoke_raw(self, request: Any) -> Any:
+        """Send an arbitrary MTProto request (see ``raw_api``); Telethon resolves peer-like parameters."""
+        try:
+            return await self.client(request)
+        except errors.FloodWaitError as exc:
+            raise RateLimitedError(exc.seconds) from exc
+
+    async def chat_info(self, chat_id: int) -> dict[str, Any]:
+        """Basic facts about a chat: title, type, username, member count and description when available."""
+        entity = await self.client.get_entity(chat_id)
+        peer = peer_from_entity(entity)
+        info: dict[str, Any] = {"id": chat_id}
+        if peer is not None:
+            info.update({"title": peer.name, "type": peer.kind, "username": peer.username, "forum": peer.is_forum})
+        with contextlib.suppress(errors.RPCError, TypeError, ValueError):
+            if isinstance(entity, types.Channel):
+                full = (await self.client(functions.channels.GetFullChannelRequest(entity))).full_chat
+                info.update({"members": full.participants_count, "about": full.about or None})
+            elif isinstance(entity, types.Chat):
+                full = (await self.client(functions.messages.GetFullChatRequest(entity.id))).full_chat
+                info.update({"members": entity.participants_count, "about": full.about or None})
+            elif isinstance(entity, types.User):
+                full = (await self.client(functions.users.GetFullUserRequest(entity))).full_user
+                info.update({"about": full.about or None})
+        return {k: v for k, v in info.items() if v is not None}
 
     async def fetch_media_ref(self, chat_id: int, msg_id: int) -> MediaRef | None:
         """Re-read a message to get a fresh ``file_reference`` for its media."""

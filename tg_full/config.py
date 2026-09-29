@@ -222,6 +222,27 @@ class InboundSection(PluginConfigBase):
         description="被回复消息的内容预览最大长度（字符）",
         json_schema_extra=_ui("回复预览长度", "Reply preview length", order=4),
     )
+    reactions: Literal["off", "context", "smart", "notice"] = Field(
+        default="smart",
+        description=(
+            "表情回应：off 忽略；context 只写入上下文（不触发回复）；"
+            "smart 对本账号消息的回应和长按大表情以通知告知（可能引发回复），其余写入上下文；notice 全部以通知告知"
+        ),
+        json_schema_extra=_ui(
+            "表情回应", "Reactions",
+            "Bot 账号需为群管理员才能收到回应；长按大表情仅用户账号可见",
+            "Bots only receive reactions as group admins; long-press big reactions are visible to user accounts only",
+            order=5,
+        ),
+    )
+    callback_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "按钮回调：按下的按钮数据匹配这些正则时，交给 MaiBot；其余一律丢弃。"
+            "MaiBot 通过工具发送的按钮会自动登记，无需填写。填空字符串会接收全部回调（不推荐）"
+        ),
+        json_schema_extra=_ui("接收的按钮回调", "Accepted button callbacks", order=6),
+    )
 
 
 class DispatchSection(PluginConfigBase):
@@ -369,6 +390,38 @@ class OutboundSection(PluginConfigBase):
         description="发送的消息中是否显示链接预览",
         json_schema_extra=_ui("链接预览", "Link previews", order=3),
     )
+    telegraph_author_name: str = Field(
+        default="",
+        description="发布到 Telegra.ph 的文章署名，留空使用本账号名称",
+        json_schema_extra=_ui("Telegraph 署名", "Telegraph author name", order=6),
+    )
+    telegraph_author_url: str = Field(
+        default="",
+        description="文章署名的链接，留空时使用本账号的 t.me 链接（若有用户名）",
+        json_schema_extra=_ui("Telegraph 署名链接", "Telegraph author link", order=7),
+    )
+    long_text_notice: str = Field(
+        default="消息过长，点击查看：",
+        description="发布长文后在聊天中发送的提示语，后面紧跟 Telegraph 链接（链接预览会显示标题与开头）",
+        json_schema_extra=_ui("长文提示语", "Long text notice", order=8),
+    )
+    long_text_ai_summary: bool = Field(
+        default=True,
+        description=(
+            "（仅用户账号）发布长文时，用 Telegram 的 AI 摘要（Cocoon）代替提示语作为消息正文：把正文开头发到本账号的"
+            "收藏夹（Saved Messages），读取一次摘要后立即删除。非会员额度很少，用尽或失败时自动改用提示语"
+        ),
+        json_schema_extra=_ui(
+            "长文使用 AI 摘要", "AI summary for long texts",
+            "Bot 账号无法使用，始终发送提示语", "Not available to bots, which always send the notice",
+            order=9,
+        ),
+    )
+    typing_indicator: bool = Field(
+        default=True,
+        description="MaiBot 开始生成回复时，在 Telegram 显示一次“正在输入…”（不会反复刷新）",
+        json_schema_extra=_ui("显示正在输入", "Show typing status", order=5),
+    )
     soft_length_warning: int = Field(
         default=1000,
         ge=0,
@@ -451,6 +504,55 @@ class MediaSection(PluginConfigBase):
     )
 
 
+class AdvancedSection(PluginConfigBase):
+    __ui_label__: ClassVar[str] = "高级"
+    __ui_order__: ClassVar[int] = 7
+    __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = _section_i18n("Advanced")
+
+    raw_api_enabled: bool = Field(
+        default=False,
+        description=(
+            "允许 MaiBot（工具 telegram_raw_api）与其他插件（API raw_invoke）直接调用任意 Telegram MTProto 方法。"
+            "风险自负：错误的调用可能删除消息、修改账号或导致账号受限"
+        ),
+        json_schema_extra=_ui(
+            "开放原始 MTProto 调用", "Allow raw MTProto calls",
+            "默认关闭。开启后工具才会出现在 MaiBot 的工具列表中；下方名单用于限制可调用的方法",
+            "Off by default. The tool only appears in MaiBot's tool list while this is on; the lists below "
+            "limit which methods can be called",
+            order=0,
+        ),
+    )
+    raw_api_allow: list[str] = Field(
+        default_factory=lambda: ["*"],
+        description="允许调用的方法（通配符，按 TL 名称匹配，例如 messages.* 或 users.getFullUser）",
+        json_schema_extra=_ui("允许的方法", "Allowed methods", order=1,
+                              depends_on="raw_api_enabled", depends_value=True),
+    )
+    raw_api_deny: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_RAW_DENY),
+        description="禁止调用的方法（优先于允许名单）。默认禁止登录/账号/支付/通话相关方法以及删除、退群、举报、拉黑、修改权限等操作",
+        json_schema_extra=_ui("禁止的方法", "Denied methods", order=2,
+                              depends_on="raw_api_enabled", depends_value=True),
+    )
+    raw_api_max_result_chars: int = Field(
+        default=8000,
+        ge=500,
+        le=100000,
+        description="返回结果（JSON）的最大字符数，超出部分截断",
+        json_schema_extra=_ui("结果长度上限", "Result size limit", order=3,
+                              depends_on="raw_api_enabled", depends_value=True),
+    )
+
+
+# Methods raw MTProto calls may not use unless the user edits advanced.raw_api_deny.
+DEFAULT_RAW_DENY = (
+    "auth.*", "account.*", "payments.*", "phone.*", "stickers.*",
+    "*.delete*", "*.leave*", "*.report*", "*.block*", "*.editAdmin", "*.editBanned", "*.editCreator",
+    "channels.togglePreHistoryHidden", "messages.deleteChat", "contacts.resetSaved",
+)
+
+
 class TelegramFullConfig(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
     account: AccountSection = Field(default_factory=AccountSection)
@@ -459,6 +561,7 @@ class TelegramFullConfig(PluginConfigBase):
     dispatch: DispatchSection = Field(default_factory=DispatchSection)
     outbound: OutboundSection = Field(default_factory=OutboundSection)
     media: MediaSection = Field(default_factory=MediaSection)
+    advanced: AdvancedSection = Field(default_factory=AdvancedSection)
 
     def connection_fingerprint(self) -> tuple[Any, ...]:
         """Fields whose change requires reconnecting the Telegram client."""
