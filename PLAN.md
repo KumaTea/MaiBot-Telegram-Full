@@ -27,6 +27,15 @@ narrows or corrects a requirement.
 - **[R3] Dependencies:** manifest `dependencies: [{"type": "python_package", "name": "telethon",
   "version_spec": ">=1.40,<2"}]`. The Host installs missing packages with `uv pip`, so users don't
   run pip themselves.
+- **[R3] Telethon's optional packages:**
+  - `cryptg` is declared as a **hard dependency**. It is about 60× faster than Telethon's libssl
+    fallback (4 ms vs 262 ms per MiB of AES-IGE, measured), and every MTProto byte is encrypted.
+    Wheels exist for CPython 3.8–3.14 on glibc Linux (x86_64/aarch64), Windows and macOS arm64,
+    which covers MaiBot's Docker, Windows and Apple-silicon setups. Elsewhere (Intel macOS,
+    musl/Alpine, 32-bit ARM) pip would need Rust to build it.
+  - `Pillow` is also declared (sticker conversion); the Host already ships it.
+  - `aiohttp` is already in the Host.
+  - `hachoir` (media metadata such as voice/video duration for uploads) gets added in Phase 3 if needed.
 - **[R24] Async:** the plugin runs in its own Runner subprocess with its own event loop. Telethon runs
   on that loop. The rule is no blocking calls: SQLite and file I/O go through `asyncio.to_thread`.
 - **Chat allow/block lists:** the Host applies a single adapter policy (`config/adapter_policy.toml`,
@@ -189,7 +198,7 @@ scripts/deploy.sh            # rsync to LXC plugins dir + restart/reload
 Each phase ends with something testable on the LXC container. Unit tests run against a fake backend,
 so most logic is tested without Telegram.
 
-### Phase 0: Scaffolding (no Telegram yet)
+### Phase 0: Scaffolding (no Telegram yet) — ✅ done 2026-09-29
 - Repo layout above, `_manifest.json` (`plugin_type: adapter`, `python_package` deps, capabilities),
   `create_plugin()`, empty lifecycle.
 - Dev env: `uv` project with `maibot-plugin-sdk==2.8.*`, `telethon>=1.40,<2`, pytest, ruff, pyright.
@@ -199,7 +208,7 @@ so most logic is tested without Telegram.
 - **Done when:** the plugin loads in the container as an *adapter*, shows up in WebUI, and the config
   schema renders.
 
-### Phase 1: Bot-account gateway MVP ([R5], [R6-bot], [R22], [R25], [R26 basic])
+### Phase 1: Bot-account gateway MVP ([R5], [R6-bot], [R22], [R25], [R26 basic]) — ✅ live-tested 2026-09-29 (outbound formatting still to verify live)
 - v1 backend: bot login, session file in `ctx.paths.data_dir` [R6.3], Telethon auto-reconnect [R5].
   Connection-state callbacks drive `gateway.update_state(ready=…)`, backed by a watchdog task.
 - Inbound text messages:
@@ -369,3 +378,5 @@ so most logic is tested without Telegram.
   The adapter config asks users for their own, and the field is required for both account types.
 - **Login code:** entered through the WebUI config field `account.login_code`. A CLI helper is the
   fallback.
+- **cryptg:** hard dependency in the manifest (see §1, [R3]). The adapter logs a warning at startup
+  if it is missing anyway.
