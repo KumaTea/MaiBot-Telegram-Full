@@ -24,7 +24,7 @@ def make_message(text: str = "hi", **kwargs) -> Message:
     defaults = {
         "chat": GROUP,
         "id": 10,
-        "date": datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc),
+        "date": datetime.now(timezone.utc),
         "sender": ALICE,
         "outgoing": False,
         "text": text,

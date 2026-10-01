@@ -187,17 +187,17 @@ class Store:
         )
         return [(row[0], row[1]) for row in rows]
 
-    async def recent_routed(self, since: float, per_chat: int) -> dict[int, list[int]]:
-        """Recently routed message ids per chat (newest first), for history polling."""
+    async def recent_routed(self, since: float, per_chat: int) -> dict[int, list[tuple[int, int]]]:
+        """Recently routed ``(msg_id, date)`` pairs per chat (newest first), for history polling."""
         rows = await self.fetchall(
-            "SELECT chat_id, msg_id FROM msg_meta WHERE routed = 1 AND date >= ? ORDER BY chat_id, msg_id DESC",
+            "SELECT chat_id, msg_id, date FROM msg_meta WHERE routed = 1 AND date >= ? ORDER BY chat_id, msg_id DESC",
             (int(since),),
         )
-        result: dict[int, list[int]] = {}
-        for chat_id, msg_id in rows:
-            ids = result.setdefault(chat_id, [])
-            if len(ids) < per_chat:
-                ids.append(msg_id)
+        result: dict[int, list[tuple[int, int]]] = {}
+        for chat_id, msg_id, date in rows:
+            pairs = result.setdefault(chat_id, [])
+            if len(pairs) < per_chat:
+                pairs.append((msg_id, date))
         return result
 
     async def is_known_to_core(self, chat_id: int, msg_id: int, max_age_seconds: int = 3600) -> bool:

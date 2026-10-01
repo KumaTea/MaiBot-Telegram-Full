@@ -26,7 +26,7 @@ UA_PRESETS: dict[str, str | None] = {
     "googlebot": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
     "browser": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/129.0.0.0 Safari/537.36"
+        "Chrome/154.0.0.0 Safari/537.36"
     ),
     "curl": "curl/8.9.1",
     "default": None,  # aiohttp's own User-Agent

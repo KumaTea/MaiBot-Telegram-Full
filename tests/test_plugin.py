@@ -65,3 +65,14 @@ def test_backend_only_uses_names_that_exist_in_installed_telethon():
             assert hasattr(getattr(tl_functions, module), name), f"{source.name}: functions.{module}.{name}"
         for name in re.findall(r"\berrors\.([A-Z]\w+)", text):
             assert hasattr(errors, name), f"{source.name}: errors.{name}"
+
+
+def test_catch_up_hooks_exist_in_installed_telethon():
+    """``_Client`` overrides a private Telethon method; fail loudly if it is renamed."""
+    from telethon import TelegramClient
+
+    from tg_full.backend.client import _Client
+
+    assert callable(getattr(TelegramClient, "_handle_auto_reconnect", None))
+    assert callable(getattr(TelegramClient, "catch_up", None))
+    assert _Client._handle_auto_reconnect is not TelegramClient._handle_auto_reconnect

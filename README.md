@@ -11,7 +11,7 @@
 | 类别 | 内容 |
 |---|---|
 | 账号 | Bot Token；用户账号支持手机号验证码（在 WebUI 填写）、两步验证、直接使用现有 Telethon 会话文件 |
-| 连接 | 断线自动重连（Telethon 快速重连 + 指数退避）；支持 SOCKS / HTTP 代理 |
+| 连接 | 断线自动重连（Telethon 快速重连 + 指数退避），重连或重启后补收离线期间的消息；支持 SOCKS / HTTP 代理 |
 | 消息 | Telegram 格式 ⇄ markdown（粗体、斜体、删除线、剧透、代码、引用、链接、提及）；LaTeX 公式自动转为纯文本（`a²`）；回复、@、转发来源、频道与匿名管理员身份、论坛话题 |
 | 媒体 | 图片、贴纸（附 `[贴纸 😂]` 提示）、语音、文件；**同一文件复用 MaiBot 已有识别结果，不重复下载与识别**；MaiBot 发出的表情若来自 Telegram，按原文件发送（原生贴纸 / 动图）；GIF 可转为真正的 GIF 供识别；链接预览，无预览时自动抓取网页标题与简介 |
 | 投递节奏 | 编辑合并后通知、删除通知、等待对方输入完成、静默窗口、攒批（按条数 / 间隔 / 自适应）、Bot 账号历史轮询（只更新上下文，不触发回复） |
@@ -114,6 +114,8 @@ ids = []
 | `reconnect_max_delay` | `300` | 重连退避上限（秒） |
 | `flood_sleep_threshold` | `60` | FloodWait 自动等待上限（秒） |
 | `telethon_log_level` | `WARNING` | Telethon 日志级别 |
+| `catch_up` | `true` | 重连或重启后补收离线期间的消息（进度保存在会话文件中，类似 Bot API 的 update offset） |
+| `catch_up_max_age` | `10` | 补收到的消息早于这么多分钟前发出时不单独触发回复，随下一条新消息一起投递，否则只作为上下文；`0` 不限 |
 
 </details>
 
@@ -148,7 +150,7 @@ MaiBot 自身会在新消息后等待约 1 秒并为积压消息评分，因此�
 | `max_wait` | `60` | 任何消息最多等待的秒数 |
 | `urgent_bypass` | `true` | @ 我、回复我、私聊跳过静默窗口与攒批 |
 | `history_poll` | `auto` | 定期重读最近消息发现编辑与删除（`auto` = 仅 Bot），只更新上下文 |
-| `poll_interval` / `poll_count` | `60` / `20` | 轮询间隔与条数 |
+| `poll_interval` / `poll_count` | `60` / `20` | 轮询间隔与每个聊天关注的最近条数；每条消息在约 1、3、7、15、31 个间隔时各重读一次，间隔逐次翻倍 |
 
 </details>
 
@@ -221,7 +223,6 @@ MaiBot 自身会在新消息后等待约 1 秒并为积压消息评分，因此�
 uv sync                 # 开发依赖（含用于测试 GIF 转换的 PyAV）
 uv run pytest -q
 uv run ruff check .
-scripts/deploy.sh       # 通过 SSH 部署到 MaiBot 容器（见脚本内的环境变量）
 ```
 
 代码结构见 [PLAN.md](PLAN.md)：`plugin.py` 只负责组件声明，功能都在 `tg_full/` 中，Telethon 只在 `tg_full/backend/` 中被导入。
@@ -229,3 +230,5 @@ scripts/deploy.sh       # 通过 SSH 部署到 MaiBot 容器（见脚本内的�
 ## 许可证
 
 [GPL-3.0-or-later](LICENSE)
+
+图标 `assets/icon.svg` 改自 [m8rge 的 Telegram 图标](https://gist.github.com/m8rge/4c2b36369c9f936c02ee883ca8ec89f1)，MIT 许可证（全文见该文件内的注释）。

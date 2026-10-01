@@ -60,6 +60,21 @@ def _reaction_text(reaction: Any) -> str:
     return "[表情]"
 
 
+class _Client(TelegramClient):
+    """``TelegramClient`` that also catches up after its own automatic reconnects.
+
+    With ``catch_up=True`` Telethon resumes from the update state saved in the session file on
+    ``connect()``, much like the Bot API's update offset. After a reconnect inside its sender it
+    only pings, so updates sent while the network was down would surface only once a later update
+    reveals the gap. Asking for the difference right away closes that window.
+    """
+
+    async def _handle_auto_reconnect(self) -> None:
+        await super()._handle_auto_reconnect()
+        if self._catch_up:
+            await self.catch_up()
+
+
 class RateLimitedError(RuntimeError):
     """Telegram asked us to wait longer than ``flood_sleep_threshold``."""
 
@@ -137,11 +152,12 @@ class TelegramBackend:
         api_hash: str,
         proxy: str = "",
         flood_sleep_threshold: int = 60,
+        catch_up: bool = True,
         app_version: str = "",
         logger: logging.Logger,
     ) -> None:
         self.logger = logger
-        self.client = TelegramClient(
+        self.client = _Client(
             str(session_path),
             api_id,
             api_hash,
@@ -150,6 +166,7 @@ class TelegramBackend:
             connection_retries=5,
             retry_delay=2,
             auto_reconnect=True,
+            catch_up=catch_up,
             request_retries=3,
             device_model="MaiBot Telegram Full",
             app_version=app_version,

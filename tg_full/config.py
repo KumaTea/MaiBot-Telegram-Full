@@ -53,11 +53,11 @@ class AccountSection(PluginConfigBase):
 
     type: Literal["bot", "user"] = Field(
         default="bot",
-        description="账号类型：bot 使用 Bot Token 登录；user 使用手机号登录（用户号 / userbot）",
+        description="账号类型：bot 使用 Bot Token 登录；user 使用手机号登录",
         json_schema_extra=_ui(
             "账号类型", "Account type",
-            "bot：Bot Token 登录；user：手机号登录（非官方客户端，存在封号风险）",
-            "bot: log in with a bot token; user: log in with a phone number (unofficial client, may get limited)",
+            "bot：Bot Token 登录；user：手机号登录",
+            "bot: log in with a bot token; user: log in with a phone number",
             order=0,
         ),
     )
@@ -66,8 +66,8 @@ class AccountSection(PluginConfigBase):
         description="Telegram API ID，Bot 与用户账号均必填",
         json_schema_extra=_ui(
             "API ID", "API ID",
-            "在 https://my.telegram.org 申请。MTProto 协议要求 Bot 也必须提供",
-            "Get it from https://my.telegram.org. MTProto requires it for bots too",
+            "在 https://my.telegram.org 申请。Bot 也必须提供",
+            "Get it from https://my.telegram.org. Required for bots too",
             order=1,
         ),
     )
@@ -98,8 +98,8 @@ class AccountSection(PluginConfigBase):
         description="两步验证密码（如账号开启了两步验证则必填）",
         json_schema_extra=_ui(
             "两步验证密码", "2FA password",
-            "账号开启两步验证但此处留空时，登录会直接失败",
-            "If the account has 2FA enabled and this is empty, login fails",
+            "账号开启两步验证时需填写",
+            "Must be filled if the account has 2FA enabled",
             input_type="password", order=5, depends_on="type", depends_value="user",
         ),
     )
@@ -108,9 +108,8 @@ class AccountSection(PluginConfigBase):
         description="登录验证码：首次登录时适配器会请求验证码，收到后填入此处并保存",
         json_schema_extra=_ui(
             "登录验证码", "Login code",
-            "首次登录时，Telegram 会把验证码发到你的其他设备。填入后保存即可继续登录；登录成功后可清空",
-            "On first login Telegram sends a code to your other devices. Enter it here and save to continue; "
-            "you may clear it after login succeeds",
+            "首次登录时，Telegram 会把验证码发到你的其他设备。填入后点击保存即可继续登录",
+            "On first login Telegram sends a code to your other devices. Enter it here and save to continue",
             order=6, depends_on="type", depends_value="user",
         ),
     )
@@ -119,7 +118,7 @@ class AccountSection(PluginConfigBase):
         description="会话文件名，保存在插件数据目录中",
         json_schema_extra=_ui(
             "会话名", "Session name",
-            "更换账号时请改名或删除旧会话文件", "Change it (or delete the old session file) when switching accounts",
+            "更换账号时请改名或删除旧会话文件", "Change it or delete the old session file when switching accounts",
             order=7,
         ),
     )
@@ -177,6 +176,29 @@ class ConnectionSection(PluginConfigBase):
         default="WARNING",
         description="Telethon 库自身的日志级别",
         json_schema_extra=_ui("Telethon 日志级别", "Telethon log level", order=3),
+    )
+    catch_up: bool = Field(
+        default=True,
+        description="断线重连或重启后，补收离线期间错过的消息（类似 Bot API 的 update offset）",
+        json_schema_extra=_ui(
+            "补收离线消息", "Catch up on missed messages",
+            "接收进度保存在会话文件中", "Progress is kept in the session file",
+            order=4,
+        ),
+    )
+    catch_up_max_age: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "补收到的、发送时间早于这么多分钟前的消息不单独触发回复：有新消息时随之一起投递，否则只作为上下文；"
+            "0 表示不限"
+        ),
+        json_schema_extra=_ui(
+            "补收消息回复时限（分钟）", "Catch-up reply limit (min)",
+            "避免长时间离线后对很久以前的消息逐一回复",
+            "Older missed messages join the next new message instead of each getting a reply",
+            order=5,
+        ),
     )
 
 
@@ -246,13 +268,6 @@ class InboundSection(PluginConfigBase):
 
 
 class DispatchSection(PluginConfigBase):
-    """When messages are handed to MaiBot (requirements R7–R11).
-
-    MaiBot already batches on its side: it waits about 1 s after an interrupting message and scores
-    each chat's backlog before planning. The silence window and lazy push below add to that wait, so
-    they are off by default.
-    """
-
     __ui_label__: ClassVar[str] = "投递节奏"
     __ui_order__: ClassVar[int] = 4
     __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = _section_i18n("Delivery timing")
@@ -349,8 +364,13 @@ class DispatchSection(PluginConfigBase):
         default=60.0,
         ge=10,
         le=3600,
-        description="历史轮询间隔（秒）",
-        json_schema_extra=_ui("轮询间隔（秒）", "Poll interval (s)", order=13),
+        description="历史轮询间隔（秒）。每条消息在发出后约 1、3、7、15、31 个间隔时各重读一次，间隔逐次翻倍",
+        json_schema_extra=_ui(
+            "轮询间隔（秒）", "Poll interval (s)",
+            "消息未变化时重读间隔逐次翻倍，一小时内每条约重读 5 次",
+            "Gaps between re-reads double, so each message is read about 5 times in its hour",
+            order=13,
+        ),
     )
     poll_count: int = Field(
         default=20,
@@ -413,7 +433,7 @@ class OutboundSection(PluginConfigBase):
         ),
         json_schema_extra=_ui(
             "长文使用 AI 摘要", "AI summary for long texts",
-            "Bot 账号无法使用，始终发送提示语", "Not available to bots, which always send the notice",
+            "（Bot 无法使用）始终发送提示语", "(Not available to bots) Always send the notice",
             order=9,
         ),
     )
@@ -568,5 +588,5 @@ class TelegramFullConfig(PluginConfigBase):
         a, c = self.account, self.connection
         return (
             self.plugin.enabled, a.type, a.api_id, a.api_hash, a.bot_token, a.phone, a.password,
-            a.session_name, c.proxy, c.flood_sleep_threshold,
+            a.session_name, c.proxy, c.flood_sleep_threshold, c.catch_up,
         )

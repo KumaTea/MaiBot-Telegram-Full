@@ -11,7 +11,7 @@ built on [Telethon](https://codeberg.org/Lonami/Telethon) (MTProto). It works wi
 | Area | What you get |
 |---|---|
 | Accounts | Bot token; user accounts with a login code entered in the WebUI, two-step verification, or an existing Telethon session file |
-| Connection | Automatic reconnection (Telethon's retries plus exponential backoff); SOCKS / HTTP proxies |
+| Connection | Automatic reconnection (Telethon's retries plus exponential backoff), catching up on messages missed while offline; SOCKS / HTTP proxies |
 | Messages | Telegram formatting ⇄ markdown (bold, italic, strike, spoiler, code, quotes, links, mentions); LaTeX turned into plain text (`a²`); replies, mentions, forward origins, channel and anonymous-admin identities, forum topics |
 | Media | Photos, stickers (with a `[贴纸 😂]` hint), voice, files. **A file MaiBot already recognized is neither downloaded nor recognized again.** Known Telegram files MaiBot sends back are resent natively (real stickers / GIFs). GIFs can be converted to real GIFs for recognition. Link previews, with page title and description fetched when Telegram has none |
 | Delivery timing | Debounced edit notices, deletion notices, waiting while someone types, silence window, batching (by count, interval or chat activity), history polling for bots (context only, never triggers a reply) |
@@ -95,10 +95,12 @@ connection changes reconnect. Section overview (see [the Chinese README](README.
 table):
 
 - `account`: type, api_id / api_hash, bot_token, phone, password, login_code, session_name
-- `connection`: proxy, reconnect backoff, FloodWait limit, Telethon log level
+- `connection`: proxy, reconnect backoff, FloodWait limit, Telethon log level, catching up on missed messages
+  (missed messages older than `catch_up_max_age` minutes, default 10, join the next new message instead of
+  each triggering a reply)
 - `inbound`: bot messages, command filter and mode, own messages, reply preview, reactions, callback patterns
 - `dispatch`: edit debounce, edit / deletion notices, silence window, typing hold, lazy push, max wait,
-  mention bypass, history polling (MaiBot already waits about 1 s and scores the backlog, so the silence
+  mention bypass, history polling with doubling gaps per message (MaiBot already waits about 1 s and scores the backlog, so the silence
   window and lazy push are off by default)
 - `outbound`: markdown / plain, quote policy, replying to bots, link previews, length warning, typing
   indicator, Telegraph author, long-text notice and AI summary
@@ -132,7 +134,6 @@ table):
 uv sync                 # dev dependencies, including PyAV for the GIF tests
 uv run pytest -q
 uv run ruff check .
-scripts/deploy.sh       # deploy into a MaiBot container over SSH (see the variables in the script)
 ```
 
 See [PLAN.md](PLAN.md) for the design: `plugin.py` only declares components, everything else lives in
@@ -141,3 +142,6 @@ See [PLAN.md](PLAN.md) for the design: `plugin.py` only declares components, eve
 ## License
 
 [GPL-3.0-or-later](LICENSE)
+
+The icon `assets/icon.svg` is adapted from [m8rge's Telegram icon](https://gist.github.com/m8rge/4c2b36369c9f936c02ee883ca8ec89f1),
+MIT License (full text in a comment inside the file).

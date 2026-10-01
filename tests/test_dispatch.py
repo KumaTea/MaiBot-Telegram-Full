@@ -1,7 +1,8 @@
 import asyncio
 import logging
+import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from conftest import ALICE, GROUP, ME, make_message
@@ -9,7 +10,7 @@ from conftest import ALICE, GROUP, ME, make_message
 from tg_full.config import DispatchSection, InboundSection, MediaSection, TelegramFullConfig
 from tg_full.inbound.codec import InboundCodec
 from tg_full.inbound.dispatcher import ChatState, Debouncer, Dispatcher, Item, adaptive_threshold, next_action
-from tg_full.inbound.pipeline import InboundPipeline
+from tg_full.inbound.pipeline import InboundPipeline, poll_due
 from tg_full.store import Store
 from tg_full.streams import StreamResolver
 
@@ -227,6 +228,44 @@ async def test_deletions_and_stacked_commands(tmp_path):
     await store.close()
 
 
+async def test_catch_up_repeats_are_skipped_and_old_messages_do_not_trigger(tmp_path):
+    quick = DispatchSection().model_copy(update={"max_wait": 0.2})  # below the UI minimum, for speed
+    pipeline, host, store = await make_pipeline(tmp_path, dispatch=quick)
+    await pipeline.on_message(make_message("hello", id=5))
+    await pipeline.on_message(make_message("hello", id=5))  # replayed after a reconnect
+    await asyncio.sleep(0.05)
+    assert [m["message_id"] for m in host.routed] == [f"{GROUP.id}:5"]
+
+    old = datetime.now(timezone.utc) - timedelta(minutes=30)
+    await pipeline.on_message(make_message("missed", id=6, date=old))
+    await asyncio.sleep(0.05)
+    assert len(host.routed) == 1  # waits for a new message instead of triggering a reply
+    await pipeline.on_message(make_message("new", id=7))
+    await asyncio.sleep(0.05)
+    assert [m["message_id"] for m in host.routed][1:] == [f"{GROUP.id}:6", f"{GROUP.id}:7"]
+
+    await pipeline.on_message(make_message("missed too", id=8, date=old))
+    await asyncio.sleep(0.4)  # no new message within max_wait: context only
+    assert len(host.routed) == 3
+    assert host.maisaka.context.lines == [("s-group", "Alice: missed too")]
+    await pipeline.close()
+    await store.close()
+
+    pipeline, host, store = await make_pipeline(tmp_path / "b")
+    pipeline.config().connection.catch_up_max_age = 0  # no limit
+    await pipeline.on_message(make_message("missed", id=6, date=old))
+    await asyncio.sleep(0.05)
+    assert [m["message_id"] for m in host.routed] == [f"{GROUP.id}:6"]
+    await pipeline.close()
+    await store.close()
+
+
+def test_poll_gaps_double_per_message():
+    ticks = range(0, 3601, 60)  # one poll a minute for an hour
+    due = [age for previous, age in zip(ticks, ticks[1:], strict=False) if poll_due(age, previous, 60)]
+    assert due == [60, 180, 420, 900, 1860]
+
+
 async def test_poll_reports_changes_as_context_only(tmp_path):
     now = datetime.now(timezone.utc)  # polling only looks at the last hour
     pipeline, host, store = await make_pipeline(tmp_path, polled={3: make_message("changed", id=3, date=now), 4: None})
@@ -234,7 +273,7 @@ async def test_poll_reports_changes_as_context_only(tmp_path):
     await pipeline.on_message(make_message("gone", id=4, date=now))
     await asyncio.sleep(0.05)
     routed_before = len(host.routed)
-    await pipeline.poll_once()
+    await pipeline.poll_once(now=time.time() + 61)  # first re-read after one poll interval
     assert len(host.routed) == routed_before  # nothing routed: no reply can be triggered
     assert sorted(host.maisaka.context.lines) == [
         ("s-group", "[消息删除] Alice发送的一条消息被删除了: 「gone」"),

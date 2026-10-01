@@ -122,6 +122,7 @@ class AdapterRuntime:
             api_hash=cfg.account.api_hash,
             proxy=cfg.connection.proxy,
             flood_sleep_threshold=cfg.connection.flood_sleep_threshold,
+            catch_up=cfg.connection.catch_up,
             app_version=VERSION,
             logger=self.logger,
         )

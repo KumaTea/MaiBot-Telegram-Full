@@ -5,7 +5,8 @@
 * Deletions drop a still-queued message, or become a notice for one MaiBot has seen.
 * Typing (R9) holds a chat's queue.
 * History polling (R11), for bots by default, re-reads recent messages to find edits and
-  deletions; those only update MaiBot's context and never trigger a reply (R11.2).
+  deletions, with doubling gaps per message; changes only update MaiBot's context and never
+  trigger a reply (R11.2).
 * Reactions (R20) become notices or context lines, depending on ``inbound.reactions``.
 * Button presses (R29) are dropped unless their data matches a registered pattern.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import re
 import time
 from collections.abc import Callable
@@ -36,6 +38,19 @@ _CALLBACK_EXACT_KEY = "callback_exact"  # button data -> label, for buttons MaiB
 _CALLBACK_PATTERNS_KEY = "callback_patterns"  # regexes registered by other plugins
 _MAX_EXACT_CALLBACKS = 500
 _STACKABLE_REASONS = ("command", "command for another bot")
+
+
+def poll_due(age: float, previous_age: float, base: float) -> bool:
+    """Whether a message is re-read now: when its age passes base, 3, 7, 15, 31... times base.
+
+    The gap between reads doubles, so a message that stays unchanged costs about five reads in
+    the polling window instead of one per poll, and quiet chats stop being polled soon.
+    """
+
+    def reads(seconds: float) -> int:
+        return int(math.log2(max(seconds, 0.0) / base + 1))
+
+    return reads(age) > reads(previous_age)
 
 
 class InboundPipeline:
@@ -63,6 +78,7 @@ class InboundPipeline:
         self.edits = Debouncer(lambda: config().dispatch.edit_debounce, self._edit_settled)
         self._blocked_until: dict[int, float] = {}  # chat id -> monotonic deadline
         self._poll_task: asyncio.Task[None] | None = None
+        self._last_poll: float | None = None
 
     def start(self) -> None:
         mode = self.config().dispatch.history_poll
@@ -85,6 +101,11 @@ class InboundPipeline:
     async def on_message(self, message: Message) -> None:
         if self._blocked(message.chat.id):
             return  # MaiBot's adapter policy rejects this chat (cached verdict)
+        if await self.store.get_message_meta(message.chat.id, message.id) is not None:
+            # Already seen or sent by us: catching up resumes from the state Telethon saved last
+            # (about once a minute), so the latest updates can come again.
+            self.logger.debug("Skipped repeated message %s/%s", message.chat.id, message.id)
+            return
         sender = message.sender
         await self.store.record_message(
             message.chat.id, message.id, sender.id if sender else None, bool(sender and sender.is_bot),
@@ -96,8 +117,13 @@ class InboundPipeline:
         if reason is not None and not stacked:
             self.logger.debug("Dropped %s/%s: %s", message.chat.id, message.id, reason)
             return
+        max_age = settings.connection.catch_up_max_age * 60
+        late = max_age > 0 and time.time() - message.date.timestamp() > max_age
+        if late:
+            # Missed while offline: joins the next new message like a stacked command does.
+            self.logger.debug("Message %s/%s is a late catch-up and will not trigger a reply", message.chat.id, message.id)
         urgent = message.chat.is_private or self.codec.mentions_me(message)
-        self.dispatcher.add(Item(message.chat.id, message=message, triggers=not stacked, urgent=urgent))
+        self.dispatcher.add(Item(message.chat.id, message=message, triggers=not (stacked or late), urgent=urgent))
 
     async def on_edit(self, message: Message) -> None:
         if message.chat.is_channel or self.dispatcher.replace_pending(message):
@@ -316,11 +342,15 @@ class InboundPipeline:
             except Exception:
                 self.logger.exception("History polling failed")
 
-    async def poll_once(self) -> None:
+    async def poll_once(self, now: float | None = None) -> None:
         settings = self.config().dispatch
-        recent = await self.store.recent_routed(time.time() - _POLL_WINDOW_SECONDS, settings.poll_count)
-        for chat_id, msg_ids in recent.items():
-            if self._blocked(chat_id):
+        now = time.time() if now is None else now
+        before = self._last_poll if self._last_poll is not None else now - settings.poll_interval
+        self._last_poll = now
+        recent = await self.store.recent_routed(now - _POLL_WINDOW_SECONDS, settings.poll_count)
+        for chat_id, rows in recent.items():
+            msg_ids = [msg_id for msg_id, date in rows if poll_due(now - date, before - date, settings.poll_interval)]
+            if not msg_ids or self._blocked(chat_id):
                 continue
             try:
                 messages = await self.backend.get_messages(chat_id, msg_ids)

@@ -123,10 +123,10 @@ class TelegramFullPlugin(MaiBotPlugin):
     @Tool(
         "telegram_react",
         description=(
-            "给当前 Telegram 聊天中的一条消息添加表情回应（reaction），用一个表情表达态度而不必发文字。"
+            "给一条消息添加表情回应（reaction）。"
             "emoji 须是 Telegram 支持的标准回应表情，例如 👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 🙏 👌 🤡 😍 "
             "💯 🤣 ⚡ 🏆 💔 🤨 😐 😈 😴 😭 🤓 👻 👀 🙈 😇 🤝 🤗 🫡 🤪 🗿 🆒 😘 😎 😡；群聊可能只允许其中一部分。"
-            "emoji 传空字符串可取消回应。big=true 会播放全屏大动画，表示强烈情绪，请少用。"
+            "emoji 传空字符串可取消回应。big=true 会播放全屏大动画，表示强烈情绪。"
         ),
         parameters=[
             ToolParameterInfo(name="msg_id", param_type=ToolParamType.STRING, description="要回应的消息的 msg_id",

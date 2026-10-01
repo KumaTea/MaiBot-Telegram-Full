@@ -215,6 +215,11 @@ so most logic is tested without Telegram.
 ### Phase 1: Bot-account gateway MVP ([R5], [R6-bot], [R22], [R25], [R26 basic]) — ✅ live-tested 2026-09-29 (outbound formatting still to verify live)
 - v1 backend: bot login, session file in `ctx.paths.data_dir` [R6.3], Telethon auto-reconnect [R5].
   Connection-state callbacks drive `gateway.update_state(ready=…)`, backed by a watchdog task.
+- Catch-up (added 2026-10-02, live-tested with @rbevbot): `catch_up=True` resumes from the update
+  state Telethon keeps in the session file (saved about once a minute), like the Bot API offset.
+  A `TelegramClient` subclass also calls `catch_up()` after Telethon's in-sender reconnects, which
+  otherwise only ping. Repeats are skipped via `msg_meta`; messages older than
+  `connection.catch_up_max_age` minutes do not trigger a reply on their own (stacked like R12).
 - Inbound text messages:
   - entities → markdown [R22]
   - reply component
@@ -346,9 +351,11 @@ As built:
   `lazy_count` and capped at `lazy_max_count`.
 - **Mentions and private chats** skip the silence window and lazy push (`urgent_bypass`); the
   typing hold still applies.
-- **[R11] History polling:** `auto` means bots only. It re-reads the last `poll_count` messages
-  MaiBot saw in the past hour, every `poll_interval`. Edits and deletions it finds go through
-  `maisaka.context.append` only and never trigger a reply [R11.2].
+- **[R11] History polling:** `auto` means bots only. It watches the last `poll_count` messages
+  per chat that MaiBot saw in the past hour. Each is re-read when its age passes 1, 3, 7, 15 and
+  31 × `poll_interval` (gaps double, about 5 reads instead of 60), so quiet chats stop costing
+  requests. Edits and deletions it finds go through `maisaka.context.append` only and never
+  trigger a reply [R11.2].
 - **[R12] `command_filter_mode = stack`:** filtered commands wait for the next real message and
   are delivered with it. If none arrives within `max_wait`, they go to MaiBot as context only.
 - New capabilities: `chat.get_all_streams`, `maisaka.context.append`. Store schema v4 adds
@@ -418,7 +425,7 @@ As built. Tools are for the LLM; APIs are for other plugins, called as `kumatea.
 - **Done when:** the tools show up in MaiBot's tool list; raw invoke is refused when off and works for
   a harmless read call when on.
 
-### Phase 7: Long text ([R26.1], [R26.2], [R26.3]) — ✅ done 2026-09-30 (AI-summary success path awaits the quota reset; fallback verified)
+### Phase 7: Long text ([R26.1], [R26.2], [R26.3]) — ✅ done 2026-09-30
 As built (`outbound/telegraph.py`):
 - **Corrections to the requirement text:**
   - Telegraph pages *can* be edited (`editPage` with the creating account's token), but not
@@ -444,6 +451,8 @@ As built (`outbound/telegraph.py`):
     `to_lang=zh` for Chinese text), the temporary message is deleted, and the chat gets
     "summary + link"
   - quota used up or any failure falls back to the notice
+  - verified 2026-09-30: a Chinese summary came back and the temporary message was deleted. The
+    fallback was verified earlier, while the quota was used up.
 - **Tool `telegram_post_long_text(title, markdown)`** (visible, because the "too long" error names
   it) and **API `post_long_text`**:
   - publishes the page, then sends the notice or AI summary plus the link (link preview on, so
@@ -466,11 +475,28 @@ As built (`outbound/telegraph.py`):
   they turn out cheap.
 - Rerun the whole test suite.
 
-### Phase 9: Polish
-- README (zh-CN + en), config i18n, migration notes from the original adapter, packaging for
-  Mai-with-u/plugin-repo.
+### Phase 9: Polish — ✅ done 2026-09-30
+- README.md (zh-CN) and README.en.md:
+  - features, install, quick start, the adapter-policy allow list (a must for user accounts)
+  - tools and APIs, the full config reference, migration from exynos967's adapter, cautions,
+    development
+- CHANGELOG.md, requirements.txt (manual installs), LICENSE (GPL-3.0-or-later, as MaiBot)
+- manifest: `license`, `urls.documentation`, `display.icon` (lucide `send`, #229ED9) and
+  `changelog`. MaiBot's validator accepts it.
+- **Publishing checklist** (https://docs.mai-mai.org/plugin/submission, checked 2026-09-30):
 
----
+  | Requirement | Status |
+  |---|---|
+  | public repo; root `_manifest.json` v2, `plugin.py` with `create_plugin()`, `LICENSE`, `README.md` | ✅ |
+  | stable id without spaces / path characters | ✅ `kumatea.telegram-full`, no clash in the index |
+  | x.y.z versions; no patch-level upper bounds on `host_application` / `sdk` | ✅ `1.2.0–1.99.99`, `2.8.0–2.99.99` |
+  | `author {name, url}`; `urls.repository` HTTPS without `.git` | ✅ |
+  | only needed capabilities | ✅ all five are used |
+  | tested in a real MaiBot | ✅ test container (MaiBot 1.2.5) |
+  | release tag = manifest version | to do: `v0.1.0` on the commit that contains the manifest |
+
+  To submit: open a plugin-repo issue with the "Add Plugin / 添加插件" template, plugin id
+  `kumatea.telegram-full` and the repository URL.
 
 ## 4. Testing
 

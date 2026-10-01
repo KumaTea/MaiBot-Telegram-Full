@@ -9,3 +9,5 @@ config.toml
 *.session
 *.session-journal
 data/
+
+scripts

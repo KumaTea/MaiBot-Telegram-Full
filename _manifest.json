@@ -72,9 +72,8 @@
   "plugin_type": "adapter",
   "display": {
     "icon": {
-      "type": "lucide",
-      "value": "send",
-      "background": "#229ED9"
+      "type": "local",
+      "value": "assets/icon.svg"
     }
   },
   "changelog": "CHANGELOG.md"
