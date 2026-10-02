@@ -85,12 +85,27 @@ class AccountSection(PluginConfigBase):
             depends_on="type", depends_value="bot",
         ),
     )
+    user_helper: bool = Field(
+        default=False,
+        description=(
+            "（仅 Bot 账号）同时登录下方的用户账号，只用来做 Bot 无法调用的两项读取：长文的 Telegram AI 摘要和"
+            "Telegram 链接预览。收发消息仍全部由 Bot 完成，适配器不会读取该用户账号的聊天"
+        ),
+        json_schema_extra=_ui(
+            "用户账号辅助", "User account helper",
+            "开启后填写手机号（及两步验证密码、验证码）。登录失败不影响 Bot 本身",
+            "Fill in the phone number (and 2FA password, login code) below. A failed login does not affect the bot",
+            order=4, depends_on="type", depends_value="bot",
+        ),
+    )
     phone: str = Field(
         default="",
-        description="手机号（账号类型为 user 且尚未登录时必填，含国家码）",
+        description="手机号（用户账号或开启用户账号辅助、且尚未登录时必填，含国家码）",
         json_schema_extra=_ui(
-            "手机号", "Phone number", "含国家码，例如 +8613800000000", "With country code, e.g. +15550000000",
-            placeholder="+8613800000000", order=4, depends_on="type", depends_value="user",
+            "手机号", "Phone number",
+            "用户账号或用户账号辅助使用。含国家码，例如 +8613800000000",
+            "For user accounts and the user account helper. With country code, e.g. +15550000000",
+            placeholder="+8613800000000", order=5,
         ),
     )
     password: str = Field(
@@ -100,7 +115,7 @@ class AccountSection(PluginConfigBase):
             "两步验证密码", "2FA password",
             "账号开启两步验证时需填写",
             "Must be filled if the account has 2FA enabled",
-            input_type="password", order=5, depends_on="type", depends_value="user",
+            input_type="password", order=6,
         ),
     )
     login_code: str = Field(
@@ -110,7 +125,7 @@ class AccountSection(PluginConfigBase):
             "登录验证码", "Login code",
             "首次登录时，Telegram 会把验证码发到你的其他设备。填入后点击保存即可继续登录",
             "On first login Telegram sends a code to your other devices. Enter it here and save to continue",
-            order=6, depends_on="type", depends_value="user",
+            order=7,
         ),
     )
     session_name: str = Field(
@@ -118,8 +133,10 @@ class AccountSection(PluginConfigBase):
         description="会话文件名，保存在插件数据目录中",
         json_schema_extra=_ui(
             "会话名", "Session name",
-            "更换账号时请改名或删除旧会话文件", "Change it or delete the old session file when switching accounts",
-            order=7,
+            "更换账号时请改名或删除旧会话文件。用户账号辅助的会话文件名后加 _helper",
+            "Change it or delete the old session file when switching accounts. The user account helper's "
+            "session gets a _helper suffix",
+            order=8,
         ),
     )
 
@@ -428,12 +445,13 @@ class OutboundSection(PluginConfigBase):
     long_text_ai_summary: bool = Field(
         default=True,
         description=(
-            "（仅用户账号）发布长文时，用 Telegram 的 AI 摘要（Cocoon）代替提示语作为消息正文：把正文开头发到本账号的"
+            "发布长文时，用 Telegram 的 AI 摘要（Cocoon）代替提示语作为消息正文：把正文开头发到用户账号的"
             "收藏夹（Saved Messages），读取一次摘要后立即删除。非会员额度很少，用尽或失败时自动改用提示语"
         ),
         json_schema_extra=_ui(
             "长文使用 AI 摘要", "AI summary for long texts",
-            "（Bot 无法使用）始终发送提示语", "(Not available to bots) Always send the notice",
+            "需要用户账号：Bot 账号请开启“用户账号辅助”，否则始终发送提示语",
+            "Needs a user account: bots need the user account helper, otherwise the notice is always sent",
             order=9,
         ),
     )
@@ -499,7 +517,10 @@ class MediaSection(PluginConfigBase):
     )
     link_preview: Literal["off", "telegram", "fetch"] = Field(
         default="fetch",
-        description="链接信息：telegram 只用 Telegram 自带的网页预览；fetch 在没有预览时由适配器自行读取网页标题与简介；off 关闭",
+        description=(
+            "链接信息：telegram 只用 Telegram 的网页预览（消息自带的；有用户账号时还会请 Telegram 生成）；"
+            "fetch 在仍没有预览时由适配器自行读取网页标题与简介；off 关闭"
+        ),
         json_schema_extra=_ui("链接信息", "Link information", order=6),
     )
     link_user_agents: list[str] = Field(
@@ -607,5 +628,5 @@ class TelegramFullConfig(PluginConfigBase):
         a, c = self.account, self.connection
         return (
             self.plugin.enabled, a.type, a.api_id, a.api_hash, a.bot_token, a.phone, a.password,
-            a.session_name, c.proxy, c.flood_sleep_threshold, c.catch_up,
+            a.session_name, a.user_helper, c.proxy, c.flood_sleep_threshold, c.catch_up,
         )

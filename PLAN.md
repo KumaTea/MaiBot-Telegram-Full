@@ -301,8 +301,15 @@ As built:
   - `thumbnail`
   - `drop`: marker only.
 - `media.video_thumbnail` (off by default) attaches a video's thumbnail for recognition.
-- **Link previews [R18]:** Telegram's web page preview first. Otherwise (`media.link_preview =
-  fetch`) the adapter fetches the page:
+- **Link previews [R18]:** Telegram's web page preview first. Otherwise two lookups run in parallel
+  (bounded together by the link timeout, keeping whatever finished in time) and each field (title,
+  description, site name) takes the longer value; Telegram wins ties:
+  - with a user account (the account itself, or a bot's user account helper, added in 0.1.2):
+    `messages.getWebPagePreview`, which bots cannot call (`BOT_METHOD_INVALID`, checked
+    2026-10-03). Telegram's servers fetch the page; new pages come back `WebPagePending` and are
+    ready on a repeated call after 1–7 s, so it retries after 1, 2 and 4 s. Some sites
+    (docs.telethon.dev) give no preview, so the adapter's own fetch stays useful.
+  - with `media.link_preview = fetch`, the adapter fetches the page:
   - reads OpenGraph / `<title>` / meta description
   - User-Agent chain, default googlebot → browser → curl → default; `none` sends no UA, and raw UA
     strings are accepted
@@ -431,6 +438,18 @@ As built. Tools are for the LLM; APIs are for other plugins, called as `kumatea.
 - **Done when:** the tools show up in MaiBot's tool list; raw invoke is refused when off and works for
   a harmless read call when on.
 
+### 0.1.2: User account helper for bots
+- `account.user_helper` (bots only, off by default) also logs in the user account from
+  `phone` / `password` / `login_code` (session `<session_name>_helper`), only for the two reads that
+  bots cannot do and that need no chat of the bot: AI summaries (`messages.summarizeText`, via the
+  helper's own Saved Messages) and link previews (`messages.getWebPagePreview`).
+- The helper connects with `receive_updates=False`, so it never sees its own chats. Message IDs,
+  peers and events stay the bot's own; there is no ID translation and nothing chat-scoped is done
+  through the helper. Its connection loop is separate: a failed login only logs an error, and
+  while it is offline both features fall back as before.
+- `runtime._user_account()` picks the account for these reads: the account itself if it is a user
+  account, else the connected helper, else none.
+
 ### Phase 7: Long text ([R26.1], [R26.2], [R26.3]) — ✅ done 2026-09-30
 As built (`outbound/telegraph.py`):
 - **Corrections to the requirement text:**
@@ -455,7 +474,7 @@ As built (`outbound/telegraph.py`):
   - user accounts with `outbound.long_text_ai_summary` (default on): the article's first ≤4000
     UTF-16 units go to the account's Saved Messages, `summarizeText` is called once (with
     `to_lang=zh` for Chinese text), the temporary message is deleted, and the chat gets
-    "summary + link"
+    "summary + link". Since 0.1.2 bots can do this through the user account helper.
   - quota used up or any failure falls back to the notice
   - verified 2026-09-30: a Chinese summary came back and the temporary message was deleted. The
     fallback was verified earlier, while the quota was used up.

@@ -17,8 +17,8 @@ from telethon import Button, TelegramClient, errors, events, functions, types, u
 
 from ..ids import ChatTarget
 from ..text.entities import Entity
-from .convert import best_thumb, media_ref, message_from_tl, peer_from_entity
-from .models import CallbackPress, MediaRef, Message, Peer, ReactionChange
+from .convert import best_thumb, media_ref, message_from_tl, peer_from_entity, webpage_from_tl
+from .models import CallbackPress, MediaRef, Message, Peer, ReactionChange, WebPage
 
 MessageCallback = Callable[[Message], Awaitable[None]]
 CodeProvider = Callable[[], Awaitable[str]]
@@ -153,6 +153,7 @@ class TelegramBackend:
         proxy: str = "",
         flood_sleep_threshold: int = 60,
         catch_up: bool = True,
+        receive_updates: bool = True,
         app_version: str = "",
         logger: logging.Logger,
     ) -> None:
@@ -167,6 +168,7 @@ class TelegramBackend:
             retry_delay=2,
             auto_reconnect=True,
             catch_up=catch_up,
+            receive_updates=receive_updates,
             request_retries=3,
             device_model="MaiBot Telegram Full",
             app_version=app_version,
@@ -610,6 +612,22 @@ class TelegramBackend:
         finally:
             with contextlib.suppress(Exception):
                 await self.client.delete_messages("me", [sent.id])
+
+    async def web_preview(self, url: str) -> WebPage | None:
+        """Telegram's own link preview of ``url``, for user accounts. Telegram's servers fetch the page.
+
+        A page Telegram has not seen yet comes back pending; asking again after a short wait
+        returns it (usually within a few seconds). ``None`` when Telegram has no preview.
+        """
+        if self.me is None or self.me.is_bot:
+            return None
+        for delay in (1, 2, 4, None):
+            result = await self.client(functions.messages.GetWebPagePreviewRequest(message=url))
+            page = getattr(result.media, "webpage", None)
+            if not isinstance(page, types.WebPagePending) or delay is None:
+                return webpage_from_tl(page)  # None for no preview or one still pending
+            await asyncio.sleep(delay)
+        return None
 
     async def invoke_raw(self, request: Any) -> Any:
         """Send an arbitrary MTProto request (see ``raw_api``); Telethon resolves peer-like parameters."""

@@ -1,10 +1,10 @@
 """Shared constants."""
 
-VERSION = "0.1.1"  # keep in sync with _manifest.json
+VERSION = "0.1.2"  # keep in sync with _manifest.json
 PLATFORM = "telegram"
 GATEWAY_NAME = "telegram_full_gateway"
 PROTOCOL = "mtproto"
-CONFIG_VERSION = "0.1.1"
+CONFIG_VERSION = "0.1.2"
 
 # Telegram limits, counted in UTF-16 code units after entity parsing.
 MAX_MESSAGE_LENGTH = 4096

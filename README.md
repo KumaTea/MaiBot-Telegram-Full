@@ -17,7 +17,7 @@
 | 投递节奏 | 编辑合并后通知、删除通知、等待输入、静默窗口、积攒推送、Bot 历史轮询 |
 | 过滤 | 其他 Bot 的消息、发给其他 Bot 的命令 |
 | 互动 | 生成回复时显示正在输入；表情回应；按钮 |
-| 长文 | 提示使用长文工具；发布到 Telegra.ph；Telegram AI 摘要 |
+| 长文 | 提示使用长文工具；发布到 Telegra.ph；Telegram AI 摘要（Bot 需开启用户账号辅助） |
 | 高级 | 调用 MTProto 方法 |
 
 ## 安装
@@ -42,6 +42,8 @@ fake-ip 代理（Clash / mihomo / sing-box）分配的 198.18.0.0/15 地址不�
 2. 在 WebUI 的插件配置填写 `account` 部分：
    - Bot 账号：`type = "bot"`，填写 `bot_token`。
      在群里接收全部消息需要向 BotFather 发送 `/setprivacy` 关闭隐私模式，或把 Bot 设为管理员（接收表情回应必须是管理员）
+     可选：打开 `user_helper` 并按下一条填写用户账号，Bot 就能使用长文 AI 摘要和 Telegram 链接预览这两项 Bot 无法调用的功能。
+     该用户账号只做这两项（摘要会在它自己的收藏夹里临时发一条并立即删除），不在任何聊天收发消息，也不读取它的聊天；登录失败不影响 Bot。
    - 用户账号：`type = "user"`，填写 `phone`；若启用两步验证则填写 `password`。
      首次启动时 Telegram 会发送验证码到其他设备，填入 `login_code` 并保存即可完成登录。
 3. 打开 `plugin.enabled` 并保存。日志出现 `Connected to Telegram as …` 即连接成功。

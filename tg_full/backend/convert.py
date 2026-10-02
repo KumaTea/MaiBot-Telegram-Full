@@ -177,7 +177,10 @@ def media_from_message(msg: Any) -> Media | None:
 
 
 def webpage_from_message(msg: Any) -> WebPage | None:
-    page = msg.web_preview
+    return webpage_from_tl(msg.web_preview)
+
+
+def webpage_from_tl(page: Any) -> WebPage | None:
     if not isinstance(page, types.WebPage):
         return None
     return WebPage(url=page.url, site_name=page.site_name, title=page.title, description=page.description)

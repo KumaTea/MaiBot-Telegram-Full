@@ -1,9 +1,17 @@
 """Link metadata for messages without a Telegram web page preview (requirement R18).
 
-Pages are fetched with a configurable chain of User-Agents (default GoogleBot -> desktop browser
--> curl -> HTTP library default); the next one is tried when a request fails or yields no
-metadata. Only http(s) links are fetched, and only the first 512 KB of HTML is read. Results,
-including "nothing found", are cached for a day.
+Two lookups run in parallel, and each field (title, description, site name) is taken from the
+one where it is longer:
+
+* Telegram's own preview, when a user account is available (the account itself, or a bot's user
+  account helper): ``messages.getWebPagePreview`` is not open to bots. Telegram's servers fetch
+  the page.
+* With ``media.link_preview = "fetch"``, the adapter fetches the page itself with a configurable
+  chain of User-Agents (default GoogleBot -> desktop browser -> curl -> HTTP library default);
+  the next one is tried when a request fails or yields no metadata.
+
+Only http(s) links are looked up, and only the first 512 KB of HTML is read. Results, including
+"nothing found", are cached for a day.
 
 Anyone in a chat can post a link, so by default hosts that resolve to loopback, LAN, link-local
 (cloud metadata) or other non-public addresses are refused, including on every redirect hop. The
@@ -23,11 +31,13 @@ import socket
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
+from typing import Protocol
 
 import aiohttp
 from aiohttp.abc import AbstractResolver
 from yarl import URL
 
+from ..backend.models import WebPage
 from ..config import MediaSection
 from ..store import Store
 
@@ -109,27 +119,62 @@ def parse_html_meta(url: str, html: str) -> LinkInfo:
     )
 
 
+class UserAccount(Protocol):
+    async def web_preview(self, url: str) -> WebPage | None: ...
+
+
 class LinkPreviewer:
-    def __init__(self, store: Store, settings: Callable[[], MediaSection], logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        store: Store,
+        settings: Callable[[], MediaSection],
+        logger: logging.Logger,
+        user_account: Callable[[], UserAccount | None] = lambda: None,
+    ) -> None:
         self.store = store
         self.settings = settings
         self.logger = logger
+        self.user_account = user_account
 
-    async def describe(self, url: str) -> LinkInfo | None:
+    async def describe(self, url: str, fetch: bool = True) -> LinkInfo | None:
+        """Telegram's preview through a user account and (with ``fetch``) the page itself, in parallel."""
+        if not url.lower().startswith(("http://", "https://")):
+            return None
         cached = await self.store.get_link(url, _CACHE_SECONDS)
         if cached is not None:
             return LinkInfo(**cached) if cached else None
+        account = self.user_account()
         settings = self.settings()
+        lookups = []
+        if account is not None:
+            lookups.append(asyncio.ensure_future(self._ask_telegram(account, url)))
+        if fetch:
+            lookups.append(asyncio.ensure_future(self._fetch(url, settings)))
+        if not lookups:
+            return None  # nothing to ask, so nothing to cache
         try:
-            # Bound the whole User-Agent chain, not just each attempt.
-            info = await asyncio.wait_for(self._fetch(url, settings), timeout=settings.link_timeout * 2 + 1)
-        except asyncio.TimeoutError:
-            info = None
-        except _Blocked as exc:
-            self.logger.debug("Link %s not fetched: %s", url, exc)
+            # Bound Telegram and the whole User-Agent chain; keep whatever finished in time.
+            done, _ = await asyncio.wait(lookups, timeout=settings.link_timeout * 2 + 1)
+        finally:
+            for task in lookups:
+                task.cancel()
+        info = _merge(url, [task.result() for task in lookups if task in done and task.exception() is None])
+        blocked = [task.exception() for task in done if isinstance(task.exception(), _Blocked)]
+        if info is None and blocked:
+            self.logger.debug("Link %s not fetched: %s", url, blocked[0])
             return None  # not cached, so turning on media.link_allow_private applies at once
         await self.store.set_link(url, asdict(info) if info else {})
         return info
+
+    async def _ask_telegram(self, account: UserAccount, url: str) -> LinkInfo | None:
+        try:
+            page = await account.web_preview(url)
+        except Exception as exc:
+            self.logger.debug("Telegram preview of %s failed: %r", url, exc)
+            return None
+        if page is None or not (page.title or page.description):
+            return None
+        return LinkInfo(url, page.title, page.description, page.site_name)
 
     async def _fetch(self, url: str, settings: MediaSection) -> LinkInfo | None:
         for agent in settings.link_user_agents or ["default"]:
@@ -180,6 +225,18 @@ class LinkPreviewer:
                         raise exc.os_error from None
                     raise
             raise aiohttp.ClientError(f"more than {_MAX_REDIRECTS} redirects")
+
+
+def _merge(url: str, results: list[LinkInfo | None]) -> LinkInfo | None:
+    """Each field from the result where it is longest (Telegram's, listed first, wins ties)."""
+    found = [info for info in results if info is not None]
+    if not found:
+        return None
+
+    def longest(field: str) -> str | None:
+        return max((getattr(info, field) or "" for info in found), key=len) or None
+
+    return LinkInfo(url, longest("title"), longest("description"), longest("site_name"))
 
 
 class _NotPage(Exception):

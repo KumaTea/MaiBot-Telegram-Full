@@ -90,6 +90,7 @@ class AdapterRuntime:
         self.logger = logger
         self.store: Store | None = None
         self.backend: TelegramBackend | None = None
+        self.helper: TelegramBackend | None = None  # a bot's user account helper (account.user_helper)
         self.inbound: InboundCodec | None = None
         self.sender: OutboundSender | None = None
         self.me: Peer | None = None
@@ -98,6 +99,7 @@ class AdapterRuntime:
         self.telegraph: TelegraphClient | None = None
         self.cache: MediaCache | None = None
         self._task: asyncio.Task[None] | None = None
+        self._helper_task: asyncio.Task[None] | None = None
         self._codes: asyncio.Queue[str] = asyncio.Queue()
         # A code already in the config belongs to an earlier login attempt and has expired.
         self._used_codes: set[str] = {config().account.login_code} - {""}
@@ -133,17 +135,33 @@ class AdapterRuntime:
         self.backend.on_reactions(self._on_reaction)
         self.backend.on_callback(self._on_callback)
         self._task = asyncio.create_task(self._run(), name="telegram_full.connection")
+        if cfg.account.type == "bot" and cfg.account.user_helper:
+            # Only for user-only reads (AI summaries, link previews): no updates, so it never sees chats.
+            self.helper = TelegramBackend(
+                session_path=data_dir / f"{cfg.account.session_name}_helper.session",
+                api_id=cfg.account.api_id,
+                api_hash=cfg.account.api_hash,
+                proxy=cfg.connection.proxy,
+                flood_sleep_threshold=cfg.connection.flood_sleep_threshold,
+                catch_up=False,
+                receive_updates=False,
+                app_version=VERSION,
+                logger=self.logger,
+            )
+            self._helper_task = asyncio.create_task(self._run_helper(), name="telegram_full.helper")
 
     async def stop(self) -> None:
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        for task in (self._task, self._helper_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        self._task = self._helper_task = None
         await self._close_pipeline()
-        if self.backend is not None:
-            with contextlib.suppress(Exception):
-                await self.backend.disconnect()
+        for backend in (self.backend, self.helper):
+            if backend is not None:
+                with contextlib.suppress(Exception):
+                    await backend.disconnect()
         await self._set_ready(False)
         if self.store is not None:
             await self.store.close()
@@ -193,7 +211,7 @@ class AdapterRuntime:
             download=backend.download,
             is_known=self.store.is_known_to_core,
             cache=self.cache,
-            links=LinkPreviewer(self.store, lambda: self.config().media, self.logger),
+            links=LinkPreviewer(self.store, lambda: self.config().media, self.logger, self._user_account),
             logger=self.logger,
         )
         self.sender = OutboundSender(
@@ -224,8 +242,43 @@ class AdapterRuntime:
         if pipeline is not None:
             await pipeline.close()
 
+    async def _run_helper(self) -> None:
+        """Keep the user account helper logged in. Its failures never affect the bot itself."""
+        assert self.helper is not None
+        helper = self.helper
+        delay = _INITIAL_RETRY_DELAY
+        while True:
+            try:
+                await helper.connect()
+                account = self.config().account
+                me = await helper.login_user(account.phone, account.password, self._next_code)
+                self.logger.info("User account helper ready as %s (id=%s) for AI summaries and link previews",
+                                 me.name, me.id)
+                delay = _INITIAL_RETRY_DELAY
+                await helper.disconnected
+            except asyncio.CancelledError:
+                raise
+            except LoginError as exc:
+                self.logger.error("User account helper login failed: %s Fix the plugin configuration to retry.", exc)
+                return
+            except Exception as exc:
+                self.logger.warning("User account helper connection failed (%r)", exc)
+            self.logger.info("User account helper reconnecting in %ss", delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, self.config().connection.reconnect_max_delay)
+
+    def _user_account(self) -> TelegramBackend | None:
+        """A connected user account for user-only reads: this account itself, or a bot's helper."""
+        for backend in (self.backend, self.helper):
+            if backend is not None and backend.me is not None and not backend.me.is_bot and backend.is_connected():
+                return backend
+        return None
+
     async def _wait_for_code(self) -> str:
         await self._set_ready(False, login_state="waiting_for_code")
+        return await self._next_code()
+
+    async def _next_code(self) -> str:
         while True:
             code = await self._codes.get()
             if code not in self._used_codes:
@@ -420,8 +473,9 @@ class AdapterRuntime:
     ) -> dict[str, Any]:
         """Publish ``markdown`` to Telegra.ph and (optionally) send it to the chat (R26.1–R26.3).
 
-        The chat message is the link after either Telegram's AI summary of the article (user
-        accounts with ``outbound.long_text_ai_summary``) or ``outbound.long_text_notice``. Telegram's
+        The chat message is the link after either Telegram's AI summary of the article (needs a
+        user account: this one, or a bot's helper; ``outbound.long_text_ai_summary``) or
+        ``outbound.long_text_notice``. Telegram's
         link preview (Instant View) shows the title and opening of the page.
         """
         backend, _, _ = self._online()
@@ -441,9 +495,10 @@ class AdapterRuntime:
             target = await self._target(stream_id)
             settings = self.config().outbound
             summary = None
-            if settings.long_text_ai_summary and not self.me.is_bot:
+            user = self._user_account()
+            if settings.long_text_ai_summary and user is not None:
                 excerpt = summary_excerpt(markdown)
-                summary = await backend.summarize_text(excerpt, summary_language(excerpt))
+                summary = await user.summarize_text(excerpt, summary_language(excerpt))
             if summary and len(summary) > 3500:
                 summary = summary[:3500].rstrip() + "…"  # keep room for the link within 4096
             notice = summary or settings.long_text_notice.strip()

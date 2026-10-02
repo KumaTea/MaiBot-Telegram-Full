@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import logging
@@ -12,7 +13,7 @@ from tg_full.ids import ChatTarget
 from tg_full.inbound.codec import InboundCodec, urls_in
 from tg_full.media import animation, link_preview
 from tg_full.media.cache import MediaCache
-from tg_full.media.link_preview import LinkPreviewer, _charset, _is_allowed, parse_html_meta
+from tg_full.media.link_preview import LinkInfo, LinkPreviewer, _charset, _is_allowed, parse_html_meta
 from tg_full.outbound.codec import build_plan
 from tg_full.outbound.sender import OutboundSender
 from tg_full.store import Store
@@ -169,9 +170,59 @@ def test_urls_in_message():
 
 
 async def test_link_previewer_only_fetches_http(store):
-    previewer = LinkPreviewer(store, MediaSection, LOG)
+    previewer = LinkPreviewer(store, MediaSection, LOG, lambda: FakeUserAccount(WebPage("x", title="X")))
     assert await previewer.describe("file:///etc/passwd") is None
-    assert await store.get_link("file:///etc/passwd", 60) == {}  # negative result cached
+    assert await store.get_link("file:///etc/passwd", 60) is None  # not even looked up
+
+
+class FakeUserAccount:
+    def __init__(self, page=None, delay=0.0):
+        self.page, self.delay, self.asked = page, delay, []
+
+    async def web_preview(self, url):
+        self.asked.append(url)
+        await asyncio.sleep(self.delay)
+        return self.page
+
+
+def previewer_with(store, account, fetched=None, fetch_delay=0.0, **media):
+    previewer = LinkPreviewer(store, lambda: MediaSection(**media), LOG, lambda: account)
+
+    async def fake_fetch(url, settings):
+        await asyncio.sleep(fetch_delay)
+        return fetched
+
+    previewer._fetch = fake_fetch
+    return previewer
+
+
+async def test_telegram_and_own_fetch_run_together_and_the_longer_field_wins(store):
+    account = FakeUserAccount(WebPage("u", site_name="GitHub", title="Telethon", description="Pure Python"))
+    fetched = LinkInfo("u", title="GitHub - LonamiWebs/Telethon", description="Pure", site_name=None)
+    info = await previewer_with(store, account, fetched).describe("https://github.com/x")
+    assert (info.title, info.description, info.site_name) == ("GitHub - LonamiWebs/Telethon", "Pure Python", "GitHub")
+    assert info.url == "https://github.com/x" and await store.get_link("https://github.com/x", 60)
+
+    # telegram mode: Telegram only.
+    info = await previewer_with(store, account, fetched).describe("https://a.io", fetch=False)
+    assert (info.title, info.description) == ("Telethon", "Pure Python")
+    # Either one alone is enough; neither gives a cached negative.
+    info = await previewer_with(store, FakeUserAccount(None), fetched).describe("https://b.io")
+    assert info.title == "GitHub - LonamiWebs/Telethon"
+    assert await previewer_with(store, FakeUserAccount(None), None).describe("https://c.io") is None
+    assert await store.get_link("https://c.io", 60) == {}
+
+
+async def test_without_a_user_account_telegram_mode_asks_nothing(store):
+    assert await previewer_with(store, None, LinkInfo("u", title="T")).describe("https://d.io", fetch=False) is None
+    assert await store.get_link("https://d.io", 60) is None
+
+
+async def test_a_slow_lookup_does_not_discard_the_other(store):
+    slow = FakeUserAccount(WebPage("u", title="Telegram"), delay=30)
+    previewer = previewer_with(store, slow, LinkInfo("u", title="Fetched"), link_timeout=1.0)
+    info = await asyncio.wait_for(previewer.describe("https://e.io"), timeout=10)
+    assert info.title == "Fetched"
 
 
 def test_only_public_and_fake_ip_addresses_are_allowed():
@@ -230,6 +281,15 @@ async def test_link_previewer_checks_every_redirect(store, local_site, monkeypat
 
     assert await previewer.describe(f"{base}/away") is None
     assert hits[-1] == "/away"  # the redirect to 127.0.0.2 was not followed
+
+
+async def test_link_segments_ask_telegram_in_telegram_mode(store):
+    account = FakeUserAccount(WebPage("u", site_name="Site", title="From Telegram"))
+    previewer = previewer_with(store, account, LinkInfo("u", title="fetched, but not in telegram mode"))
+    codec, _ = codec_for(store, FakeDb(), media_settings=lambda: MediaSection(link_preview="telegram"), links=previewer)
+    payload = await codec.build(make_message("go example.org", entities=[Entity("url", 3, 11)]))
+    assert payload["raw_message"][-1]["data"] == "\n[链接预览: Site | From Telegram]"
+    assert account.asked == ["http://example.org"]
 
 
 async def test_link_segments_telegram_preview_and_fetch(store):

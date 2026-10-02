@@ -351,11 +351,11 @@ class InboundCodec:
         page = message.webpage
         if page is not None and (page.title or page.description):
             return [_text(link_marker(LinkInfo(page.url, page.title, page.description, page.site_name)))]
-        if mode != "fetch" or self.links is None:
+        if self.links is None:
             return []
         segments = []
         for url in urls_in(message)[:MAX_LINKS_PER_MESSAGE]:
-            info = await self.links.describe(url)
+            info = await self.links.describe(url, fetch=mode == "fetch")
             if info is not None:
                 segments.append(_text(link_marker(info)))
         return segments

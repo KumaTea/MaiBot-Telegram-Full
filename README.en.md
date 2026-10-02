@@ -17,7 +17,7 @@ built on [Telethon](https://codeberg.org/Lonami/Telethon) (MTProto). It works wi
 | Delivery timing | Debounced edit notices, deletion notices, waiting while someone types, silence window, batching (by count, interval or chat activity), history polling for bots (context only, never triggers a reply) |
 | Filters | Messages from other bots; commands for other bots (dropped, or delivered with the next message) |
 | Interaction | "typing…" once while MaiBot writes a reply; reactions in and out (including long-press big reactions); inline buttons and callbacks |
-| Long text | Messages over 4096 characters are refused with a pointer to the long-text tool; publishing to Telegra.ph with editing and clearing; user accounts can use Telegram's AI summary as the message body |
+| Long text | Messages over 4096 characters are refused with a pointer to the long-text tool; publishing to Telegra.ph with editing and clearing; user accounts (or bots with the user account helper) can use Telegram's AI summary as the message body |
 | Advanced | Call any MTProto method directly (off by default, with allow / deny lists) |
 
 ## Installation
@@ -40,6 +40,10 @@ Restart MaiBot; the plugin is recognized as an **adapter**. MaiBot installs the 
 2. Fill in the `account` section in the WebUI (or `config.toml` in the plugin folder):
    - **Bot:** `type = "bot"` and `bot_token` from [@BotFather](https://t.me/BotFather). To see all
      group messages, disable privacy mode (`/setprivacy`) or make the bot an admin (reactions need admin).
+     Optional: turn on `user_helper` and fill in a user account as below. The bot can then use the two
+     things bots cannot call: AI summaries for long texts and Telegram's own link previews. The helper
+     does nothing else (a summary briefly puts a note in its own Saved Messages and deletes it), takes
+     part in no chat and never reads its chats. If its login fails, the bot keeps working.
    - **User account:** `type = "user"`, `phone`, and `password` if two-step verification is on. On
      first start Telegram sends a code to your other devices; enter it in `login_code` and save.
      Alternatively put an existing Telethon session at `data/plugins/kumatea.telegram-full/<session_name>.session`.
@@ -94,7 +98,8 @@ Every option has an English label in the WebUI, and all of them hot-reload; only
 connection changes reconnect. Section overview (see [the Chinese README](README.md#配置参考) for the full
 table):
 
-- `account`: type, api_id / api_hash, bot_token, phone, password, login_code, session_name
+- `account`: type, api_id / api_hash, bot_token, user account helper (bots), phone, password, login_code,
+  session_name
 - `connection`: proxy, reconnect backoff, FloodWait limit, Telethon log level, catching up on missed messages
   (missed messages older than `catch_up_max_age` minutes, default 10, join the next new message instead of
   each triggering a reply)

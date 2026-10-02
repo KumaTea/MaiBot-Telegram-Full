@@ -91,3 +91,67 @@ async def test_recent_stickers_are_unique(tmp_path):
     assert sorted(s["file_key"] for s in stickers) == ["document:1", "document:2"]  # one row per sticker
     assert (await store.media_by_key("document:2"))["emoji"] == "❤️"
     await store.close()
+
+
+# ---- user account helper ---------------------------------------------------------------------
+
+
+class _FakeTL:
+    def __init__(self, pages):
+        self.pages = list(pages)
+
+    async def __call__(self, request):
+        assert isinstance(request, functions.messages.GetWebPagePreviewRequest)
+        return types.messages.WebPagePreview(media=types.MessageMediaWebPage(webpage=self.pages.pop(0)), chats=[],
+                                             users=[])
+
+
+async def test_web_preview_waits_for_pending_pages(tmp_path, monkeypatch):
+    import logging
+
+    from conftest import ALICE, ME
+
+    from tg_full.backend import client as client_module
+    from tg_full.backend.client import TelegramBackend
+
+    async def no_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(client_module.asyncio, "sleep", no_sleep)
+    backend = TelegramBackend(session_path=tmp_path / "h.session", api_id=1, api_hash="x", receive_updates=False,
+                              logger=logging.getLogger("t"))
+    pending = types.WebPagePending(id=1, date=None, url="https://x.io")
+    page = types.WebPage(id=1, url="https://x.io", display_url="x.io", hash=0, title="X", site_name="Site")
+    backend.client = _FakeTL([pending, pending, page])
+    backend.me = ALICE
+    preview = await backend.web_preview("https://x.io")
+    assert (preview.title, preview.site_name) == ("X", "Site")
+
+    backend.client = _FakeTL([pending] * 4)
+    assert await backend.web_preview("https://x.io") is None  # still pending after about 7 s
+    backend.me = ME
+    assert await backend.web_preview("https://x.io") is None  # bots cannot ask
+
+
+def test_user_account_is_the_account_itself_or_the_bots_helper():
+    import logging
+    from types import SimpleNamespace
+
+    from conftest import ALICE, ME
+
+    from tg_full.config import TelegramFullConfig
+    from tg_full.runtime import AdapterRuntime
+
+    def account(me, connected=True):
+        return SimpleNamespace(me=me, is_connected=lambda: connected)
+
+    runtime = AdapterRuntime(None, TelegramFullConfig, logging.getLogger("t"))
+    assert runtime._user_account() is None
+    runtime.backend = account(ALICE)
+    assert runtime._user_account() is runtime.backend  # a user account serves itself
+    runtime.backend = account(ME)
+    assert runtime._user_account() is None
+    runtime.helper = account(ALICE, connected=False)
+    assert runtime._user_account() is None  # helper offline: fall back as before
+    runtime.helper = account(ALICE)
+    assert runtime._user_account() is runtime.helper
