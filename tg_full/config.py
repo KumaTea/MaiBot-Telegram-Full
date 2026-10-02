@@ -17,6 +17,8 @@ from .constants import CONFIG_VERSION
 def _ui(label: str, en_label: str, hint: str = "", en_hint: str = "", **extra: Any) -> dict[str, Any]:
     """Build ``json_schema_extra`` UI metadata with an en-US translation."""
     meta: dict[str, Any] = {"label": label, **extra}
+    if "input_type" in extra:
+        meta["x-widget"] = extra["input_type"]  # the SDK takes the WebUI control (ui_type) from x-widget only
     en: dict[str, str] = {"label": en_label}
     if hint:
         meta["hint"] = hint

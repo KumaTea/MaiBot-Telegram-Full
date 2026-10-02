@@ -26,6 +26,9 @@ def test_plugin_loads_like_maibot_runner(plugin_module):
     assert defaults["plugin"]["enabled"] is False
     schema = plugin.get_webui_config_schema()
     assert schema
+    # The WebUI picks its control from ui_type; secrets must render as masked password inputs.
+    fields = schema["sections"]["account"]["fields"]
+    assert [name for name, f in fields.items() if f["ui_type"] == "password"] == ["api_hash", "bot_token", "password"]
 
 
 async def test_store_roundtrip(tmp_path):
