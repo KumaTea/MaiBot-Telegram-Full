@@ -32,6 +32,20 @@ def test_markdown_maps_onto_telegraph_tags():
     ]
 
 
+def test_raw_html_embeds_and_unsafe_links_are_dropped():
+    nodes = markdown_to_nodes(
+        '<iframe src="https://evil.example/x"></iframe>\n\n<video src="https://evil.example/v.mp4">clip</video>\n\n'
+        '[ok](https://x.io) <a href="javascript:alert(1)">js</a> <a href="java&#x09;script:x">tab</a> '
+        '<img src="data:image/png;base64,AAAA"> <a href="tg://user?id=1">tg</a>'
+    )
+    flat = repr(nodes)
+    assert "iframe" not in flat and "video" not in flat and "evil.example" not in flat
+    assert "javascript" not in flat and "data:" not in flat and "img" not in flat
+    links = [n for n in nodes[-1]["children"] if isinstance(n, dict) and n["tag"] == "a"]
+    assert [link["attrs"]["href"] for link in links] == ["https://x.io", "tg://user?id=1"]
+    assert "js" in nodes[-1]["children"] and "tab" in nodes[-1]["children"]  # unwrapped, text kept
+
+
 def test_summary_excerpt_fits_one_message_and_language():
     from tg_full.outbound.telegraph import summary_excerpt, summary_language
     from tg_full.text.entities import utf16_len
@@ -111,9 +125,11 @@ async def test_edit_clear_and_ownership(tmp_path):
     assert params["title"] == CLEARED_TITLE and params["content"][0]["tag"] == "p"
     assert (await client.pages())[0]["title"] == CLEARED_TITLE and "token" not in (await client.pages())[0]
 
-    # A page published before tracking: tried with the current account, which Telegraph accepts.
-    await client.edit("Older-Page-09-29", "T", "x", "Kuma AI", "")
-    assert client.calls[-1][1]["path"] == "Older-Page-09-29"
-    with pytest.raises(TelegraphError, match="not published by this adapter"):
+    # Only recorded pages can be edited: Telegraph is never asked about any other page.
+    calls = len(client.calls)
+    with pytest.raises(TelegraphError, match="not among the pages this adapter published"):
         await client.clear("https://telegra.ph/Someone-Elses-09-30")
+    with pytest.raises(TelegraphError, match="T-09-30"):
+        await client.edit("Older-Page-09-29", "T", "x", "Kuma AI", "")
+    assert len(client.calls) == calls
     await store.close()

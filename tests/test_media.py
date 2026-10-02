@@ -3,15 +3,16 @@ import io
 import logging
 
 import pytest
+from aiohttp import web
 from conftest import GROUP, make_message
 
 from tg_full.backend.models import Media, MediaRef, WebPage
 from tg_full.config import InboundSection, MediaSection, OutboundSection
 from tg_full.ids import ChatTarget
 from tg_full.inbound.codec import InboundCodec, urls_in
-from tg_full.media import animation
+from tg_full.media import animation, link_preview
 from tg_full.media.cache import MediaCache
-from tg_full.media.link_preview import LinkPreviewer, _charset, parse_html_meta
+from tg_full.media.link_preview import LinkPreviewer, _charset, _is_allowed, parse_html_meta
 from tg_full.outbound.codec import build_plan
 from tg_full.outbound.sender import OutboundSender
 from tg_full.store import Store
@@ -90,9 +91,16 @@ async def test_cache_disabled_always_downloads(store):
 
 async def test_animation_modes(store):
     gif_media = Media("animation", "document:9", has_thumb=True, ref=MediaRef("document", 9, 1, b""))
-    codec, downloads = codec_for(store, FakeDb(), payload=b"\xff\xd8\xffthumb")
+    codec, downloads = codec_for(store, FakeDb(), media_settings=lambda: MediaSection(animation="thumbnail"),
+                                 payload=b"\xff\xd8\xffthumb")
     payload = await codec.build(make_message("", media=gif_media))
     assert payload["raw_message"][0]["type"] == "emoji" and downloads == [True]
+
+    # gif (the default): a file that cannot be converted falls back to the thumbnail.
+    other = Media("animation", "document:8", has_thumb=True, ref=MediaRef("document", 8, 1, b""))
+    codec, downloads = codec_for(store, FakeDb(), payload=b"\xff\xd8\xffnot a video")
+    payload = await codec.build(make_message("", media=other))
+    assert payload["raw_message"][0]["type"] == "emoji" and downloads == [False, True]
 
     codec, downloads = codec_for(store, FakeDb(), media_settings=lambda: MediaSection(animation="drop"))
     payload = await codec.build(make_message("", media=gif_media))
@@ -164,6 +172,64 @@ async def test_link_previewer_only_fetches_http(store):
     previewer = LinkPreviewer(store, MediaSection, LOG)
     assert await previewer.describe("file:///etc/passwd") is None
     assert await store.get_link("file:///etc/passwd", 60) == {}  # negative result cached
+
+
+def test_only_public_and_fake_ip_addresses_are_allowed():
+    for private in ("127.0.0.1", "10.1.2.3", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1",
+                    "0.0.0.0", "224.0.0.1", "::1", "fe80::1", "fd00::1", "::ffff:127.0.0.1", "nope"):
+        assert not _is_allowed(private), private
+    for public in ("1.1.1.1", "93.184.215.14", "2606:4700:4700::1111"):
+        assert _is_allowed(public), public
+    for fake_ip in ("198.18.0.1", "198.18.0.29", "198.19.255.254", "::ffff:198.18.0.5"):
+        assert _is_allowed(fake_ip), fake_ip
+
+
+async def test_link_previewer_refuses_private_hosts(store):
+    previewer = LinkPreviewer(store, MediaSection, LOG)
+    for url in ("http://127.0.0.1:9/", "http://[::1]:9/", "http://169.254.169.254/latest/meta-data/",
+                "http://localhost:9/"):
+        assert await previewer.describe(url) is None, url
+        assert await store.get_link(url, 60) is None, url  # not cached: allowing private addresses applies at once
+
+    # Allowed: fetched (and failing, as nothing listens on port 9), so the negative result is cached.
+    previewer = LinkPreviewer(store, lambda: MediaSection(link_allow_private=True, link_user_agents=["default"]), LOG)
+    assert await previewer.describe("http://127.0.0.1:9/") is None
+    assert await store.get_link("http://127.0.0.1:9/", 60) == {}
+
+
+@pytest.fixture
+async def local_site():
+    """A site on 127.0.0.1 (treated as public by the tests) that redirects within itself and elsewhere."""
+    hits = []
+
+    async def handle(request):
+        hits.append(request.path)
+        if request.path == "/hop":
+            raise web.HTTPFound("/page")
+        if request.path == "/away":
+            raise web.HTTPFound(f"http://127.0.0.2:{request.url.port}/secret")
+        return web.Response(text='<head><meta property="og:title" content="Local"></head>', content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    yield f"http://127.0.0.1:{port}", hits
+    await runner.cleanup()
+
+
+async def test_link_previewer_checks_every_redirect(store, local_site, monkeypatch):
+    base, hits = local_site
+    monkeypatch.setattr(link_preview, "_is_allowed", lambda address: address == "127.0.0.1")
+    previewer = LinkPreviewer(store, lambda: MediaSection(link_user_agents=["default"]), LOG)
+    info = await previewer.describe(f"{base}/hop")
+    assert info is not None and info.title == "Local" and hits == ["/hop", "/page"]
+
+    assert await previewer.describe(f"{base}/away") is None
+    assert hits[-1] == "/away"  # the redirect to 127.0.0.2 was not followed
 
 
 async def test_link_segments_telegram_preview_and_fetch(store):

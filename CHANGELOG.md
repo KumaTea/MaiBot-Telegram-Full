@@ -1,5 +1,15 @@
 # 更新日志 / Changelog
 
+## 0.1.1 — 2026-10-02
+
+根据插件仓库审核意见修改。Changes from the plugin-repo review.
+
+- 链接预览：不再读取解析到本机、局域网、链路本地（含云服务器元数据 169.254.169.254）等非公网地址的链接，每次重定向都会重新检查；fake-ip 代理的 198.18.0.0/15 地址不受影响。新增 `media.link_allow_private`（默认关闭）可放开限制。
+- PyAV（`av`）改为必需依赖并在 manifest 中声明，移除运行时自动安装及 `media.install_pyav`；`media.animation` 默认改为 `gif`。
+- 原始 MTProto 调用：允许名单默认只含读取类方法（`*.get*`、`*.search*`、`*.check*`、`contacts.resolve*`），空名单不再等于全部允许；`messages.getBotCallbackAnswer`（会按下按钮）加入默认禁止名单。
+- Telegraph：渲染时去掉原始 HTML 中的 iframe / video，链接只保留 http(s) / mailto / tg；只能修改或清空本适配器记录过的页面，不再用当前账号去尝试未记录的页面。
+- 配置版本升至 0.1.1：MaiBot 会按新结构重建配置，保留已有的值。
+
 ## 0.1.0 — 2026-09-30
 
 首个版本。First release.

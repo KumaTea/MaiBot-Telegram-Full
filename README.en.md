@@ -104,9 +104,9 @@ table):
   window and lazy push are off by default)
 - `outbound`: markdown / plain, quote policy, replying to bots, link previews, length warning, typing
   indicator, Telegraph author, long-text notice and AI summary
-- `media`: recognition reuse, native resend, sticker hint, animations (thumbnail / GIF / drop), PyAV
-  auto-install, video thumbnails, link previews and User-Agent chain
-- `advanced`: raw MTProto calls and their allow / deny lists
+- `media`: recognition reuse, native resend, sticker hint, animations (GIF / thumbnail / drop), video
+  thumbnails, link previews, User-Agent chain and whether private addresses may be fetched
+- `advanced`: raw MTProto calls and their allow / deny lists (read-only methods by default)
 
 ## Migrating from exynos967/MaiBot-Telegram-Adapter
 
@@ -126,12 +126,13 @@ table):
 - **Telegraph pages are public to anyone with the link and cannot be deleted**, only edited or cleared.
 - `telegram_raw_api` can do anything; review the allow / deny lists before enabling it. Every call is
   logged at WARNING level.
-- Fake-ip proxies (Clash / mihomo / sing-box) need no special setup.
+- Link previews do not fetch loopback / LAN / link-local addresses unless `media.link_allow_private` is
+  on. Fake-ip proxies (Clash / mihomo / sing-box, 198.18.0.0/15) need no special setup.
 
 ## Development
 
 ```bash
-uv sync                 # dev dependencies, including PyAV for the GIF tests
+uv sync                 # runtime and dev dependencies
 uv run pytest -q
 uv run ruff check .
 ```

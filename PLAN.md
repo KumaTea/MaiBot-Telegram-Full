@@ -74,10 +74,10 @@ narrows or corrects a requirement.
   sha256 matches a sticker we've already seen, we resend it natively by document reference instead of
   uploading an image.
 - **[R17] GIF/animation:** Telegram provides a static JPEG thumbnail for animations, video stickers and
-  animated stickers. The default is to use that thumbnail, so no ffmpeg is needed. Optional opt-in:
-  real GIF conversion through PyAV (`av` wheel, which bundles ffmpeg, about 30–60 MB). The adapter
-  installs it itself only when the user turns on a config switch, which serves as the approval. The
-  other option is to discard animations.
+  animated stickers. GIFs are common on Telegram, so the default is real GIF conversion through PyAV
+  (`av` wheel, which bundles ffmpeg, about 30–60 MB), declared as a regular dependency. (Earlier the
+  adapter installed it at runtime behind a switch; the plugin-repo review asked for declared
+  dependencies instead.) The thumbnail and discarding animations remain as options.
 - **[R9] Typing detection is userbot-only.** Bots never receive `UpdateUserTyping` or
   `UpdateChannelUserTyping`.
 - **[R11] Bots can't call `messages.getHistory`**, but they can call `messages.getMessages` or
@@ -295,10 +295,10 @@ As built:
 - **Stickers [R16]:** static ones are sent as the webp itself; Lottie and video stickers use a real
   thumbnail (≥100 px, never the tiny inline preview). Prefixed with `[贴纸 😂]` (configurable).
 - **Animations [R17]:** `media.animation`
-  - `thumbnail` (default)
-  - `gif`: a real GIF, 12 frames from the first 6 s, ≤320 px, which MaiBot's emoji system stitches
-    into frames for its vision model. Uses PyAV; with `media.install_pyav` the adapter installs it
-    itself in the background and uses thumbnails until then.
+  - `gif` (default): a real GIF, 12 frames from the first 6 s, ≤320 px, which MaiBot's emoji system
+    stitches into frames for its vision model. Uses PyAV; falls back to the thumbnail if conversion
+    fails or PyAV cannot be imported.
+  - `thumbnail`
   - `drop`: marker only.
 - `media.video_thumbnail` (off by default) attaches a video's thumbnail for recognition.
 - **Link previews [R18]:** Telegram's web page preview first. Otherwise (`media.link_preview =
@@ -308,8 +308,12 @@ As built:
     strings are accepted
   - charset from the header or `<meta charset>`
   - results are cached for 24 h (negative results too)
-  - http(s) only; no address filtering (fake-ip DNS setups are common among Telegram users, so
-    LAN detection would break fetching)
+  - http(s) only. Hosts resolving to loopback / private / link-local / other non-global addresses
+    are refused (SSRF, from the plugin-repo review), checked in the connector's resolver and on every
+    redirect hop, which the adapter follows itself. Fake-ip placeholders (198.18.0.0/15, common
+    among Telegram users) are allowed, although Python does not count them as global; behind such a
+    proxy the real address is resolved by the proxy and cannot be checked. `media.link_allow_private`
+    (off by default) turns the check off. Refusals are not cached.
 - **Moved to Phase 6:** the sticker *tools* for the LLM ("find stickers for 😂", "send sticker").
   They need the same stream → chat resolution as the other tools. The index they need is already
   stored.
@@ -415,9 +419,11 @@ As built. Tools are for the LLM; APIs are for other plugins, called as `kumatea.
   - input: TL method name (`messages.getHistory`, `messages.GetHistoryRequest`, …) plus JSON params
     (snake_case or camelCase; nested TL objects as `{"_": "Type", …}` like Telethon's `to_dict()`;
     `"$chat"` means the current chat). Telethon resolves peers given by id or username.
-  - allow / deny glob lists on the canonical name. The default deny list covers auth, account,
-    payments, phone and sticker-set management, deletes, leaves, reports, blocks and
-    admin/ban/creator edits.
+  - allow / deny glob lists on the canonical name. The default allow list is read-only
+    (`*.get*`, `*.search*`, `*.check*`, `contacts.resolve*`); an empty allow list allows nothing.
+    The default deny list covers auth, account, payments, phone and sticker-set management, deletes,
+    leaves, reports, blocks, admin/ban/creator edits and `messages.getBotCallbackAnswer` (presses a
+    button).
   - result: JSON-safe `to_dict()` (bytes as base64, dates ISO), truncated to
     `raw_api_max_result_chars`. Every call is logged at WARNING level as an audit trail.
   - the tool description tells the LLM it is high-risk and to check https://tl.telethon.dev first
@@ -435,8 +441,8 @@ As built (`outbound/telegraph.py`):
       description and result point to it) and APIs `edit_long_text` / `list_long_texts`
     - `clear=true` overwrites title and body with a placeholder ("（已清空）"), the closest thing to
       deleting
-    - pages published before tracking are tried with the current account; Telegraph refuses
-      other accounts' pages (`PAGE_ACCESS_DENIED`), and the error lists the editable pages
+    - only recorded pages can be edited; any other page is refused without asking Telegraph, and
+      the error lists the editable pages
   - **Cocoon AI summary** (`messages.summarizeText(peer, id)`), tested 2026-09-30 from @Kuma_AI
     (not Premium):
     - it summarizes the *message text*; a link-only message gets a summary of the placeholder
@@ -463,7 +469,9 @@ As built (`outbound/telegraph.py`):
   re-creation.
 - **Content:** the same markdown parser as messages, with single newlines as `<br>`, mapped to
   Telegraph's tags (headings → h3/h4, tables → `a | b` lines, spoilers → plain text,
-  unsupported tags unwrapped). LaTeX is converted as in messages. 64 KB limit checked.
+  unsupported tags unwrapped). Raw HTML embeds (iframe / video) are unwrapped and links keep only
+  http(s) / mailto / tg URLs, because the LLM's input includes other people's messages. LaTeX is
+  converted as in messages. 64 KB limit checked.
 - Messages over 4096 are still refused (as required); the error and the >1000 warning now name
   the tool.
 - **Done when:** a 5000-character reply is refused with guidance, and posting it to Telegraph returns

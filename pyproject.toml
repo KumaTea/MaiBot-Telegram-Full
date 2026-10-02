@@ -2,7 +2,7 @@
 # are declared in _manifest.json and installed by the MaiBot host.
 [project]
 name = "maibot-telegram-full"
-version = "0.1.0"
+version = "0.1.1"
 description = "Telethon based full-featured Telegram adapter for MaiBot"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,11 +13,11 @@ dependencies = [
     "aiohttp>=3.8",
     "markdown-it-py>=3.0",
     "python-socks>=2.4",
+    "av>=12",  # GIF conversion; the wheels bundle ffmpeg
 ]
 
 [dependency-groups]
 dev = [
-    "av>=12",  # optional at runtime (GIF conversion); installed here to test it
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",

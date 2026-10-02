@@ -482,21 +482,15 @@ class MediaSection(PluginConfigBase):
         description="在贴纸前附上它代表的 emoji，例如 [贴纸 😂]，帮助 MaiBot 理解贴纸含义",
         json_schema_extra=_ui("贴纸 emoji 提示", "Sticker emoji hint", order=2),
     )
-    animation: Literal["thumbnail", "gif", "drop"] = Field(
-        default="thumbnail",
-        description="GIF 动图与视频贴纸：thumbnail 使用 Telegram 提供的静态缩略图；gif 转成真正的 GIF，MaiBot 能看到多帧（需要 PyAV）；drop 只保留 [动图] 标记",
+    animation: Literal["gif", "thumbnail", "drop"] = Field(
+        default="gif",
+        description="GIF 动图与视频贴纸：gif 转成真正的 GIF，MaiBot 能看到多帧；thumbnail 只用 Telegram 提供的静态缩略图；drop 只保留 [动图] 标记",
         json_schema_extra=_ui(
             "动图处理", "Animations",
-            "Telegram 的 GIF 实际是 MP4 视频。gif 模式在 PyAV 缺失时退回缩略图",
-            "Telegram GIFs are MP4 videos. gif mode falls back to thumbnails while PyAV is missing",
+            "Telegram 的 GIF 实际是 MP4 视频，gif 模式用 PyAV 转换，转换失败时退回缩略图",
+            "Telegram GIFs are MP4 videos. gif mode converts them with PyAV and falls back to the thumbnail on failure",
             order=3,
         ),
-    )
-    install_pyav: bool = Field(
-        default=False,
-        description="动图处理为 gif 且未安装 PyAV 时，允许适配器自动安装（约 30–60 MB，自带 ffmpeg，无需另装系统依赖）",
-        json_schema_extra=_ui("自动安装 PyAV", "Install PyAV automatically", order=4,
-                              depends_on="animation", depends_value="gif"),
     )
     video_thumbnail: bool = Field(
         default=False,
@@ -522,6 +516,20 @@ class MediaSection(PluginConfigBase):
         json_schema_extra=_ui("网页请求超时（秒）", "Page request timeout (s)", order=8,
                               depends_on="link_preview", depends_value="fetch"),
     )
+    link_allow_private: bool = Field(
+        default=False,
+        description=(
+            "允许读取解析到本机、局域网、链路本地等非公网地址的链接。关闭时这类链接不读取，"
+            "避免群成员借适配器探测内网与云服务器元数据"
+        ),
+        json_schema_extra=_ui(
+            "允许读取内网地址", "Allow private addresses",
+            "fake-ip 代理（Clash / mihomo / sing-box）分配的 198.18.0.0/15 地址始终允许，无需为此开启",
+            "Fake-ip proxy addresses (Clash / mihomo / sing-box, 198.18.0.0/15) are always allowed; "
+            "no need to turn this on for them",
+            order=9, depends_on="link_preview", depends_value="fetch",
+        ),
+    )
 
 
 class AdvancedSection(PluginConfigBase):
@@ -544,10 +552,17 @@ class AdvancedSection(PluginConfigBase):
         ),
     )
     raw_api_allow: list[str] = Field(
-        default_factory=lambda: ["*"],
-        description="允许调用的方法（通配符，按 TL 名称匹配，例如 messages.* 或 users.getFullUser）",
-        json_schema_extra=_ui("允许的方法", "Allowed methods", order=1,
-                              depends_on="raw_api_enabled", depends_value=True),
+        default_factory=lambda: list(DEFAULT_RAW_ALLOW),
+        description=(
+            "允许调用的方法（通配符，按 TL 名称匹配，例如 messages.* 或 users.getFullUser）。"
+            "默认只允许读取类方法（get / search / check / resolve）"
+        ),
+        json_schema_extra=_ui(
+            "允许的方法", "Allowed methods",
+            "需要写操作时在此添加，例如 messages.sendMessage；填 * 允许全部（仍受禁止名单限制）",
+            "Add write methods here when needed, e.g. messages.sendMessage; * allows everything not denied below",
+            order=1, depends_on="raw_api_enabled", depends_value=True,
+        ),
     )
     raw_api_deny: list[str] = Field(
         default_factory=lambda: list(DEFAULT_RAW_DENY),
@@ -565,11 +580,15 @@ class AdvancedSection(PluginConfigBase):
     )
 
 
+# Methods raw MTProto calls may use by default: read-only ones.
+DEFAULT_RAW_ALLOW = ("*.get*", "*.search*", "*.check*", "contacts.resolve*")
+
 # Methods raw MTProto calls may not use unless the user edits advanced.raw_api_deny.
 DEFAULT_RAW_DENY = (
     "auth.*", "account.*", "payments.*", "phone.*", "stickers.*",
     "*.delete*", "*.leave*", "*.report*", "*.block*", "*.editAdmin", "*.editBanned", "*.editCreator",
     "channels.togglePreHistoryHidden", "messages.deleteChat", "contacts.resetSaved",
+    "messages.getBotCallbackAnswer",  # presses an inline button
 )
 
 

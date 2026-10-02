@@ -58,3 +58,29 @@ It will be an enhanced version of https://github.com/exynos967/MaiBot-Telegram-A
 27. All storing we mentioned, we should first see if we can integrate to MaiBot's (afaik they have some advanced sql service), if not fallback to sqlite or other technique you prefer.
 28. With so many plans and requirements, we should make each component a script rather than a single huge py file for better maintenance. This is only a suggestion.
 29. Button callbacks data are discarded by default, but the core can register specific pattern of callback data (or set the pattern to an empty string to receive all, which is not recommended) to receive, so that if the core has created buttons that receive user input, the callback data will be pushed to the core instead of be dismissed.
+
+---
+
+I've modified several strings a little. Before submitting, there are a few things I would like to know / improve:
+
+1. The old adapter can resume from the last message after reconnected from network disconnection. I believe it is achieved by bot API's update id of getUpdates. I observed that our new one cannot. Does Telethon support a similar approach? If it requires some self maintained messages database then nevermind. Or if it's a single update ID's effort, then it's good to go.
+
+2. Does the plugin support words filters? I'm not sure if the Maibot core supports; if not, is it a good idea to support?
+
+3. Does the adapter icon support svg or webp? If so we can make a telegram (paper plane) symbol on it. Make the background to be default instead of the current blue one. This link (https://gist.github.com/m8rge/4c2b36369c9f936c02ee883ca8ec89f1) provides MIT licensed icon.
+
+One more question: how do we handle periodically pull old messages to monitor edits / deletions (mainly on bot accounts which use get messages api)? If there are some mechanisms like after 1 hour or after 5 visits (if so then I think it should be exponentially rising, like 1m -> 2m -> 4m -> 8m -> ... for each messages) it still remains the same, it is excluded from the watch list, that's good; if it's a while true loop, it's not so elegant. However I am just afraid of flood rate limits; if it's far from it, and the mechanisms require lots of coding effort, just nevermind.
+
+---
+
+Please check the auto review bot's comment:
+https://github.com/Mai-with-u/plugin-repo/issues/718#issuecomment-5939601090
+
+1. Link not refusing loopback / lan networks. We explicitly wants lan because of fake ip scenario. But for the publish, let's add this switch (allow private addresses), defaults to off. For me I will enable it later.
+2. PyAV not announced: since animated gif is dominant on Telegram, lets remove the switch and make pyav mandatory.
+3. Raw api call: fix or not, up to you.
+4 and 5: I don't understand its command, also up to you.
+
+Tell me if you can't read the comment.
+
+Oh, fake-ip's default 198.18.0.1/16 might not be affected by lo's 127.0.0.1 and lan's 10.x, 172.x and 192.x. However before we enabled that we did test and fail. You may further look at it. And, we can bump the version to 0.1.1.

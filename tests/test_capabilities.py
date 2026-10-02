@@ -5,11 +5,12 @@ from telethon.tl import functions, types
 
 from tg_full.backend.models import Media, MediaRef
 from tg_full.backend.raw_api import RawApiError, build_request, is_allowed, resolve_method, result_to_json
-from tg_full.config import DEFAULT_RAW_DENY
+from tg_full.config import DEFAULT_RAW_ALLOW, DEFAULT_RAW_DENY
 from tg_full.media.cache import MediaCache
 from tg_full.runtime import _plain_emoji, _substitute_chat
 from tg_full.store import Store
 
+ALLOW = list(DEFAULT_RAW_ALLOW)
 DENY = list(DEFAULT_RAW_DENY)
 
 
@@ -33,6 +34,16 @@ def test_default_deny_list():
     for harmless in ("messages.getHistory", "users.getFullUser", "messages.sendReaction"):
         assert is_allowed(harmless, ["*"], DENY), harmless
     assert not is_allowed("users.getFullUser", ["messages.*"], DENY)
+    assert not is_allowed("users.getFullUser", [], DENY)  # an empty allow list allows nothing
+
+
+def test_default_allow_list_is_read_only():
+    for read in ("messages.getHistory", "users.getFullUser", "channels.getParticipants", "messages.search",
+                 "contacts.resolveUsername", "messages.checkChatInvite", "help.getConfig"):
+        assert is_allowed(read, ALLOW, DENY), read
+    for write in ("messages.sendMessage", "messages.sendReaction", "messages.editMessage", "channels.inviteToChannel",
+                  "messages.exportChatInvite", "messages.getBotCallbackAnswer", "account.getPassword"):
+        assert not is_allowed(write, ALLOW, DENY), write
 
 
 def test_build_request_with_camel_case_and_nested_objects():

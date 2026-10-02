@@ -12,7 +12,8 @@ A call names a TL method and gives JSON parameters, e.g.::
 * Peers, users and channels can be given as ids or usernames: Telethon resolves them when the
   request is sent.
 * Every method is checked against allow / deny glob lists on the canonical ``namespace.method``
-  name (TL spelling, e.g. ``messages.deleteMessages``).
+  name (TL spelling, e.g. ``messages.deleteMessages``). The default allow list only has read-only
+  methods; an empty allow list allows nothing.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ def resolve_method(name: str) -> tuple[type[TLRequest], str]:
 def is_allowed(canonical: str, allow: list[str], deny: list[str]) -> bool:
     if any(fnmatch.fnmatchcase(canonical, pattern) for pattern in deny):
         return False
-    return any(fnmatch.fnmatchcase(canonical, pattern) for pattern in allow or ["*"])
+    return any(fnmatch.fnmatchcase(canonical, pattern) for pattern in allow)
 
 
 def _signature_text(cls: type) -> str:
@@ -100,7 +101,10 @@ def build_object(cls: type, params: dict[str, Any]) -> Any:
 def build_request(method: str, params: dict[str, Any] | None, allow: list[str], deny: list[str]) -> tuple[TLRequest, str]:
     request_class, canonical = resolve_method(method)
     if not is_allowed(canonical, allow, deny):
-        raise RawApiError(f"{canonical} is blocked by the adapter's raw API allow / deny lists")
+        raise RawApiError(
+            f"{canonical} is blocked by the adapter's raw API allow / deny lists "
+            "(advanced.raw_api_allow / raw_api_deny; by default only read-only methods are allowed)"
+        )
     if params is not None and not isinstance(params, dict):
         raise RawApiError("params must be a JSON object")
     return build_object(request_class, params or {}), canonical

@@ -6,7 +6,9 @@ its token. "Clearing" overwrites a page with a placeholder, the closest thing to
 
 * Markdown is rendered with the same parser as outgoing messages, then mapped onto Telegraph's
   node format and its small tag set (headings become h3/h4, tables become ``a | b`` lines,
-  unsupported tags are unwrapped).
+  unsupported tags are unwrapped). The text comes from the LLM, whose input includes other
+  people's messages, so embeds (iframe / video) are never kept and links must be http(s), mailto
+  or tg.
 * One Telegraph account is created on first use and reused.
 """
 
@@ -42,10 +44,11 @@ _TAGS = {
     "p": "p", "br": "br", "hr": "hr", "blockquote": "blockquote", "pre": "pre", "code": "code",
     "strong": "strong", "b": "b", "em": "em", "i": "i", "s": "s", "del": "s", "strike": "s", "u": "u", "ins": "u",
     "a": "a", "img": "img", "ul": "ul", "ol": "ol", "li": "li",
-    "figure": "figure", "figcaption": "figcaption", "aside": "aside", "iframe": "iframe", "video": "video",
+    "figure": "figure", "figcaption": "figcaption", "aside": "aside",
     "tr": "p",  # table rows become paragraphs, cells are joined with " | "
 }
 _VOID = {"br", "hr", "img"}
+_SAFE_URL = re.compile(r"(?i)(https?|mailto|tg):")
 
 
 class TelegraphError(RuntimeError):
@@ -82,12 +85,12 @@ class _NodeBuilder(HTMLParser):
                 self._children().append(" | ")
             self._cells += 1
         mapped = _TAGS.get(tag)
-        if mapped is None:
+        kept = {k: v.strip() for k, v in attrs if k in ("href", "src") and v and _SAFE_URL.match(v.strip())}
+        if mapped is None or (mapped in ("a", "img") and not kept):
             if tag not in _VOID:
                 self._stack.append((tag, None))
             return
         node: dict[str, Any] = {"tag": mapped}
-        kept = {k: v for k, v in attrs if k in ("href", "src") and v}
         if kept:
             node["attrs"] = kept
         self._children().append(node)
@@ -253,24 +256,14 @@ class TelegraphClient:
         for record in await self.store.get_json(_PAGES_KEY, []):
             if record["path"] == path:
                 return record
-        # Not recorded (e.g. published before pages were tracked): try the current account;
-        # Telegraph itself refuses pages of other accounts.
-        account = await self.store.get_json(_ACCOUNT_KEY)
-        if account is None:
-            raise TelegraphError("No Telegraph account yet, so there is no page to edit")
-        return {"path": path, "url": f"https://telegra.ph/{path}", "title": "", "token": account["access_token"]}
+        recent = ", ".join(p["url"] for p in (await self.pages())[:5]) or "none"
+        raise TelegraphError(
+            f"https://telegra.ph/{path} is not among the pages this adapter published, so it cannot be edited. "
+            f"Pages it can edit: {recent}"
+        )
 
     async def _edit_page(self, record: dict[str, Any], **params: Any) -> dict[str, Any]:
-        try:
-            result = await self._call("editPage", access_token=record["token"], path=record["path"], **params)
-        except TelegraphError as exc:
-            if "PAGE_ACCESS_DENIED" in str(exc) or "PAGE_NOT_FOUND" in str(exc):
-                recent = ", ".join(p["url"] for p in (await self.pages())[:5]) or "none"
-                raise TelegraphError(
-                    f"{record['url']} was not published by this adapter's Telegraph account, so it cannot be "
-                    f"edited ({exc}). Pages it can edit: {recent}"
-                ) from exc
-            raise
+        result = await self._call("editPage", access_token=record["token"], path=record["path"], **params)
         await self._remember(result, record["token"])
         return result
 

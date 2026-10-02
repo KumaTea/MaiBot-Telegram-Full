@@ -2,66 +2,27 @@
 
 MaiBot understands GIF emoji: it stitches up to 15 distinct frames into one image for its
 vision model. Decoding video needs PyAV, which bundles ffmpeg in its wheels, so no system
-package is required. PyAV is optional: it is only installed when the user enables it.
+package is required.
 """
 
 from __future__ import annotations
 
-import asyncio
-import importlib
+import functools
 import io
-import logging
-import shutil
-import sys
 
 _MAX_FRAMES = 12
 _MAX_SIDE = 320
 _MAX_SECONDS = 6.0
 
-_install_lock = asyncio.Lock()
-_install_failed = False
 
-
+@functools.cache
 def pyav_available() -> bool:
+    """PyAV is a declared dependency; this only guards against a failed install."""
     try:
         import av  # noqa: F401
     except ImportError:
         return False
     return True
-
-
-async def install_pyav(logger: logging.Logger) -> bool:
-    """Install PyAV into the running interpreter's environment (once per process)."""
-    global _install_failed
-    if pyav_available():
-        return True
-    if _install_failed:
-        return False
-    async with _install_lock:
-        if pyav_available():
-            return True
-        if shutil.which("uv"):
-            command = ["uv", "pip", "install", "--python", sys.executable, "av"]
-        else:
-            command = [sys.executable, "-m", "pip", "install", "av"]
-        logger.warning("Installing PyAV for GIF conversion: %s", " ".join(command))
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            _, stderr = await asyncio.wait_for(process.communicate(), timeout=900)
-        except (OSError, asyncio.TimeoutError) as exc:
-            _install_failed = True
-            logger.error("PyAV installation failed: %r. Animations use thumbnails instead.", exc)
-            return False
-        if process.returncode != 0:
-            _install_failed = True
-            logger.error("PyAV installation failed: %s", stderr.decode(errors="replace")[-500:])
-            return False
-        importlib.invalidate_caches()
-        ok = pyav_available()
-        logger.warning("PyAV installed%s", "" if ok else ", but it cannot be imported until MaiBot restarts")
-        return ok
 
 
 def video_to_gif(data: bytes) -> bytes | None:

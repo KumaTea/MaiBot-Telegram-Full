@@ -176,7 +176,6 @@ class InboundCodec:
         self.cache = cache
         self.links = links
         self.logger = logger
-        self._pyav_install: asyncio.Task[bool] | None = None
 
     # ---- helpers -----------------------------------------------------------------------
 
@@ -302,11 +301,8 @@ class InboundCodec:
         settings = self.media_settings()
         if settings.animation == "drop":
             return None
-        if settings.animation == "gif":
-            if animation.pyav_available():
-                return "gif"
-            if settings.install_pyav and self._pyav_install is None:
-                self._pyav_install = asyncio.create_task(animation.install_pyav(self.logger))
+        if settings.animation == "gif" and animation.pyav_available():
+            return "gif"
         return "thumb" if media.has_thumb else None
 
     async def _media_segments(self, message: Message) -> list[dict[str, Any]]:

@@ -4,20 +4,29 @@ Pages are fetched with a configurable chain of User-Agents (default GoogleBot ->
 -> curl -> HTTP library default); the next one is tried when a request fails or yields no
 metadata. Only http(s) links are fetched, and only the first 512 KB of HTML is read. Results,
 including "nothing found", are cached for a day.
+
+Anyone in a chat can post a link, so by default hosts that resolve to loopback, LAN, link-local
+(cloud metadata) or other non-public addresses are refused, including on every redirect hop. The
+check runs in the connector's resolver, so the connection uses exactly the addresses checked.
+Fake-ip placeholders (198.18.0.0/15) are allowed: behind such a proxy every host resolves there,
+and the proxy resolves the real host itself. ``media.link_allow_private`` turns the check off.
 """
 
 from __future__ import annotations
 
 import asyncio
 import codecs
+import ipaddress
 import logging
 import re
+import socket
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
-from urllib.parse import urlparse
 
 import aiohttp
+from aiohttp.abc import AbstractResolver
+from yarl import URL
 
 from ..config import MediaSection
 from ..store import Store
@@ -34,6 +43,7 @@ UA_PRESETS: dict[str, str | None] = {
 }
 _MAX_BYTES = 512 * 1024
 _MAX_REDIRECTS = 4
+_REDIRECTS = (301, 302, 303, 307, 308)
 _CACHE_SECONDS = 24 * 3600
 
 
@@ -115,6 +125,9 @@ class LinkPreviewer:
             info = await asyncio.wait_for(self._fetch(url, settings), timeout=settings.link_timeout * 2 + 1)
         except asyncio.TimeoutError:
             info = None
+        except _Blocked as exc:
+            self.logger.debug("Link %s not fetched: %s", url, exc)
+            return None  # not cached, so turning on media.link_allow_private applies at once
         await self.store.set_link(url, asdict(info) if info else {})
         return info
 
@@ -122,9 +135,11 @@ class LinkPreviewer:
         for agent in settings.link_user_agents or ["default"]:
             user_agent = UA_PRESETS.get(agent.strip().lower(), agent.strip())
             try:
-                info = await self._fetch_once(url, user_agent, settings.link_timeout)
+                info = await self._fetch_once(url, user_agent, settings.link_timeout, settings.link_allow_private)
             except _NotPage:
                 return None  # not a web page: other User-Agents will not help
+            except _Blocked:
+                raise
             except Exception as exc:
                 self.logger.debug("Link fetch %s with %r failed: %r", url, agent, exc)
                 continue
@@ -132,28 +147,94 @@ class LinkPreviewer:
                 return info
         return None
 
-    async def _fetch_once(self, url: str, user_agent: str | None, timeout: float) -> LinkInfo | None:
-        if urlparse(url).scheme not in ("http", "https"):
-            raise _NotPage
+    async def _fetch_once(
+        self, url: str, user_agent: str | None, timeout: float, allow_private: bool
+    ) -> LinkInfo | None:
         headers = {"Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
         skip: list[str] = []
         if user_agent:
             headers["User-Agent"] = user_agent
         elif user_agent == "":
             skip.append("User-Agent")
+        connector = None if allow_private else aiohttp.TCPConnector(resolver=_PublicResolver())
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout), headers=headers, skip_auto_headers=skip
+            timeout=aiohttp.ClientTimeout(total=timeout), headers=headers, skip_auto_headers=skip, connector=connector
         ) as session:
-            async with session.get(url, allow_redirects=True, max_redirects=_MAX_REDIRECTS) as response:
-                response.raise_for_status()
-                if "html" not in response.headers.get("Content-Type", "html").lower():
-                    raise _NotPage
-                body = await response.content.read(_MAX_BYTES)
-                return parse_html_meta(url, body.decode(_charset(response.charset, body), errors="replace"))
+            target = URL(url)
+            # Redirects are followed here so that every hop gets the same checks.
+            for _ in range(_MAX_REDIRECTS + 1):
+                _check_target(target, allow_private)
+                try:
+                    async with session.get(target, allow_redirects=False) as response:
+                        location = response.headers.get("Location")
+                        if response.status in _REDIRECTS and location:
+                            target = response.url.join(URL(location))
+                            continue
+                        response.raise_for_status()
+                        if "html" not in response.headers.get("Content-Type", "html").lower():
+                            raise _NotPage
+                        body = await response.content.read(_MAX_BYTES)
+                        return parse_html_meta(url, body.decode(_charset(response.charset, body), errors="replace"))
+                except aiohttp.ClientConnectorError as exc:
+                    if isinstance(exc.os_error, _Blocked):
+                        raise exc.os_error from None
+                    raise
+            raise aiohttp.ClientError(f"more than {_MAX_REDIRECTS} redirects")
 
 
 class _NotPage(Exception):
     pass
+
+
+class _Blocked(OSError):
+    """The link points at a non-public address and ``media.link_allow_private`` is off."""
+
+
+# Placeholders handed out by proxies in fake-ip DNS mode (Clash / mihomo / sing-box). The range is
+# reserved for benchmarking (RFC 2544), so it is not where LAN hosts live, but Python does not count
+# it as global.
+_FAKE_IP = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _is_allowed(address: str) -> bool:
+    """A public address or a fake-ip placeholder: not loopback, LAN, link-local, multicast, …"""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip in _FAKE_IP or (ip.is_global and not ip.is_multicast)
+
+
+def _check_target(url: URL, allow_private: bool) -> None:
+    if url.scheme not in ("http", "https") or not url.host:
+        raise _NotPage
+    if allow_private:
+        return
+    try:
+        ipaddress.ip_address(url.host)
+    except ValueError:
+        return  # a host name: checked by _PublicResolver when connecting
+    if not _is_allowed(url.host):
+        raise _Blocked(f"{url.host} is not a public address")
+
+
+class _PublicResolver(AbstractResolver):
+    """Resolves with getaddrinfo like aiohttp's default resolver, but drops disallowed addresses."""
+
+    def __init__(self) -> None:
+        self._resolver = aiohttp.ThreadedResolver()
+
+    async def resolve(self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET) -> list:
+        addresses = await self._resolver.resolve(host, port, family)
+        allowed = [address for address in addresses if _is_allowed(address["host"])]
+        if not allowed:
+            raise _Blocked(f"{host} resolves to non-public addresses only")
+        return allowed
+
+    async def close(self) -> None:
+        await self._resolver.close()
 
 
 _META_CHARSET = re.compile(rb"<meta[^>]+charset=[\"']?([A-Za-z0-9_-]+)", re.I)

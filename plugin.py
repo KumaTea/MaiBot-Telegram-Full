@@ -283,7 +283,8 @@ class TelegramFullPlugin(MaiBotPlugin):
             "method 为 TL 方法名，例如 messages.getHistory；params 为 JSON 对象，参数名与 https://tl.telethon.dev "
             "上的一致（snake_case 或 camelCase 均可），嵌套的 TL 对象写成 {\"_\": \"类型名\", ...}，"
             "字符串 \"$chat\" 代表当前聊天。调用前务必先查阅 https://tl.telethon.dev 确认方法和全部必填参数；"
-            "不确定时不要调用，错误的调用可能造成不可撤销的后果。删除、退群、账号、支付等方法默认被禁止。"
+            "不确定时不要调用，错误的调用可能造成不可撤销的后果。默认只允许读取类方法（get / search / check / "
+            "resolve），其他方法需用户在配置中放行；删除、退群、账号、支付等方法默认被禁止。"
         ),
         parameters=[
             ToolParameterInfo(name="method", param_type=ToolParamType.STRING, description="TL 方法名",

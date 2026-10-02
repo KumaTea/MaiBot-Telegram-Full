@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "Telegram Full Adapter",
   "description": "基于 Telethon (MTProto) 的 Telegram 全功能适配器，支持 Bot 与用户账号",
   "author": {
@@ -52,6 +52,11 @@
       "type": "python_package",
       "name": "aiohttp",
       "version_spec": ">=3.8"
+    },
+    {
+      "type": "python_package",
+      "name": "av",
+      "version_spec": ">=12"
     }
   ],
   "capabilities": [
