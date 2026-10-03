@@ -33,7 +33,7 @@ git clone https://github.com/KumaTea/MaiBot-Telegram-Full.git kumatea_telegram-f
 
 `cryptg` 与 `av`（PyAV，用于 GIF 转码，自带 ffmpeg）为必需依赖。未提供预编译的平台可能安装失败。
 
-链接预览默认不读取本机、局域网等非公网地址（`media.link_allow_private` 可放开）。
+链接预览与 Telegram 用户看到的一致：发送者关闭预览就不读取（`media.link_preview_always` 可改为总是读取），Telegram 预览的图片一并交给 MaiBot 识别（`media.link_preview_image`）。默认不读取本机、局域网等非公网地址（`media.link_allow_private` 可放开）。
 fake-ip 代理（Clash / mihomo / sing-box）分配的 198.18.0.0/15 地址不受影响，无需额外配置。
 
 ## 快速开始

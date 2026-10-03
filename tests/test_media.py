@@ -10,7 +10,7 @@ from conftest import GROUP, make_message
 from tg_full.backend.models import Media, MediaRef, WebPage
 from tg_full.config import InboundSection, MediaSection, OutboundSection
 from tg_full.ids import ChatTarget
-from tg_full.inbound.codec import InboundCodec, urls_in
+from tg_full.inbound.codec import InboundCodec, _previewed_link, urls_in
 from tg_full.media import animation, link_preview
 from tg_full.media.cache import MediaCache
 from tg_full.media.link_preview import LinkInfo, LinkPreviewer, _charset, _is_allowed, parse_html_meta
@@ -163,6 +163,13 @@ def test_charset_helper():
     assert _charset(None, b"<html>") == "utf-8"
 
 
+def test_previewed_link_matches_telegrams_normalized_url():
+    urls = ["https://b23.tv/x", "http://www.Blog.io/p/a/", "http://c.io"]
+    assert _previewed_link(urls, "https://blog.io/p/a") == "http://www.Blog.io/p/a/"
+    assert _previewed_link(urls, "https://bilibili.com/video/x") == "https://b23.tv/x"  # redirected: the first
+    assert _previewed_link(urls, None) == "https://b23.tv/x" and _previewed_link([], "https://a.io") is None
+
+
 def test_urls_in_message():
     text = "see example.com and docs"
     message = make_message(text, entities=[Entity("url", 4, 11), Entity("text_url", 20, 4, url="https://d.io/x")])
@@ -177,12 +184,16 @@ async def test_link_previewer_only_fetches_http(store):
 
 class FakeUserAccount:
     def __init__(self, page=None, delay=0.0):
-        self.page, self.delay, self.asked = page, delay, []
+        self.page, self.delay, self.asked, self.downloaded = page, delay, [], []
 
     async def web_preview(self, url):
         self.asked.append(url)
         await asyncio.sleep(self.delay)
         return self.page
+
+    async def download_webpage_photo(self, page):
+        self.downloaded.append(page.url)
+        return b"\xff\xd8preview photo"
 
 
 def previewer_with(store, account, fetched=None, fetch_delay=0.0, **media):
@@ -287,7 +298,7 @@ async def test_link_segments_ask_telegram_in_telegram_mode(store):
     account = FakeUserAccount(WebPage("u", site_name="Site", title="From Telegram"))
     previewer = previewer_with(store, account, LinkInfo("u", title="fetched, but not in telegram mode"))
     codec, _ = codec_for(store, FakeDb(), media_settings=lambda: MediaSection(link_preview="telegram"), links=previewer)
-    payload = await codec.build(make_message("go example.org", entities=[Entity("url", 3, 11)]))
+    payload = await codec.build(make_message("go example.org", entities=[Entity("url", 3, 11)], link_preview=True))
     assert payload["raw_message"][-1]["data"] == "\n[链接预览: Site | From Telegram]"
     assert account.asked == ["http://example.org"]
 
@@ -297,13 +308,88 @@ async def test_link_segments_telegram_preview_and_fetch(store):
     await store.set_link("http://example.com", {"url": "http://example.com", "title": "Example", "description": "D",
                                                  "site_name": None})
     codec, _ = codec_for(store, FakeDb(), links=previewer)
-    message = make_message("go example.com", entities=[Entity("url", 3, 11)])
+    message = make_message("go example.com", entities=[Entity("url", 3, 11)], link_preview=True)
     payload = await codec.build(message)
     assert payload["raw_message"][-1]["data"] == "\n[链接预览: Example — D]"
 
     page = WebPage("https://t.me/x", site_name="Telegram", title="T", description="From Telegram")
-    payload = await codec.build(make_message("https://t.me/x", webpage=page))
+    payload = await codec.build(make_message("https://t.me/x", webpage=page, link_preview=True))
     assert payload["raw_message"][-1]["data"] == "\n[链接预览: Telegram | T — From Telegram]"
+
+
+async def test_no_link_lookup_when_the_sender_turned_previews_off(store):
+    account = FakeUserAccount(WebPage("u", title="From Telegram"))
+    fetched = LinkInfo("u", title="Fetched")
+    message = make_message("go example.org", entities=[Entity("url", 3, 11)])  # sent without a preview
+    codec, _ = codec_for(store, FakeDb(), links=previewer_with(store, account, fetched))
+    payload = await codec.build(message)
+    assert payload["raw_message"] == [{"type": "text", "data": "go example.org"}] and account.asked == []
+
+    always = lambda: MediaSection(link_preview_always=True)  # noqa: E731
+    codec, _ = codec_for(store, FakeDb(), media_settings=always, links=previewer_with(store, account, fetched))
+    payload = await codec.build(message)
+    # No photo in Telegram's preview: no image.
+    assert payload["raw_message"][1:] == [{"type": "text", "data": "\n[链接预览: From Telegram]"}]
+    assert account.asked == ["http://example.org"]
+
+
+async def test_telegram_preview_photo_goes_along_for_the_previewed_link(store):
+    account = FakeUserAccount(WebPage("u", title="From Telegram", has_photo=True))
+    text = "a.io and b.io"
+    message = make_message(text, entities=[Entity("url", 0, 4), Entity("url", 9, 4)], link_preview=True,
+                           link_preview_url="https://www.b.io/")  # as Telegram normalizes it
+    codec, _ = codec_for(store, FakeDb(), links=previewer_with(store, account, None))
+    payload = await codec.build(message)
+    marker_b, image, marker_a = payload["raw_message"][1:]
+    assert marker_b["data"] == marker_a["data"] == "\n[链接预览: From Telegram]"
+    assert image["type"] == "image" and base64.b64decode(image["binary_data_base64"]) == b"\xff\xd8preview photo"
+    assert payload["is_picture"]
+    assert account.downloaded == ["u"] and account.asked == ["http://b.io", "http://a.io"]  # page reused
+
+    # Cached text, new process: Telegram is asked again for the photo only.
+    codec, _ = codec_for(store, FakeDb(), links=previewer_with(store, account, None))
+    payload = await codec.build(message)
+    assert payload["raw_message"][2]["type"] == "image" and account.asked[-1] == "http://b.io"
+
+    no_images = lambda: MediaSection(link_preview_image=False)  # noqa: E731
+    codec, _ = codec_for(store, FakeDb(), media_settings=no_images, links=previewer_with(store, account, None))
+    payload = await codec.build(message)
+    assert [seg["type"] for seg in payload["raw_message"]] == ["text"] * 3
+
+
+async def test_a_stale_preview_photo_asks_telegram_again(store):
+    account = FakeUserAccount(WebPage("u", title="T", has_photo=True))
+    previewer = previewer_with(store, account, None)
+    await previewer.describe("https://f.io")
+    real = account.download_webpage_photo
+    attempts = []
+
+    async def expire_once(page):
+        attempts.append(page.url)
+        if len(attempts) == 1:
+            raise RuntimeError("FILE_REFERENCE_EXPIRED")
+        return await real(page)
+
+    account.download_webpage_photo = expire_once
+    assert await previewer.photo("https://f.io") == b"\xff\xd8preview photo"
+    assert account.asked == ["https://f.io"] * 2 and len(attempts) == 2
+
+
+async def test_own_fetch_never_adds_an_image(store):
+    account = FakeUserAccount(None)  # Telegram has no preview
+    message = make_message("c.io", entities=[Entity("url", 0, 4)], link_preview=True)
+    codec, _ = codec_for(store, FakeDb(), links=previewer_with(store, account, LinkInfo("u", title="Fetched")))
+    payload = await codec.build(message)
+    assert [seg["type"] for seg in payload["raw_message"]] == ["text", "text"] and account.downloaded == []
+
+
+async def test_preview_photo_of_the_accounts_own_page(store):
+    account = FakeUserAccount()
+    page = WebPage("https://t.me/x", title="T", has_photo=True)
+    codec, _ = codec_for(store, FakeDb(), links=LinkPreviewer(store, MediaSection, LOG, lambda: account))
+    payload = await codec.build(make_message("https://t.me/x", webpage=page, link_preview=True))
+    assert payload["raw_message"][-1]["type"] == "image" and account.downloaded == ["https://t.me/x"]
+    assert account.asked == []
 
 
 # ---- native resend ---------------------------------------------------------------------------

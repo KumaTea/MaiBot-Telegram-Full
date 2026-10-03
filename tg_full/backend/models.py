@@ -48,6 +48,8 @@ class WebPage:
     site_name: str | None = None
     title: str | None = None
     description: str | None = None
+    has_photo: bool = False
+    raw: Any = field(default=None, repr=False, compare=False)  # the TL page, to download its photo
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,9 @@ class Message:
     reply_message: Message | None = None
     forward: Forward | None = None
     media: Media | None = None
-    webpage: WebPage | None = None
+    webpage: WebPage | None = None  # full preview: user accounts only, bots get an empty page
+    link_preview: bool = False  # shown with a link preview (the sender left it on)
+    link_preview_url: str | None = None  # the link it previews, when Telegram says
     topic_id: int | None = None
     edit_date: datetime | None = None
     grouped_id: int | None = None

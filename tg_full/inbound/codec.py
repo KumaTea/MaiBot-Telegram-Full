@@ -149,6 +149,24 @@ def urls_in(message: Message) -> list[str]:
     return urls
 
 
+def _same_link(url: str) -> str:
+    """Comparable form of a link: Telegram reports previewed links without scheme, ``www.`` or a final ``/``."""
+    rest = url.split("://", 1)[-1]
+    host, _, path = rest.partition("/")
+    host = host.lower().removeprefix("www.")
+    return f"{host}/{path}".rstrip("/")
+
+
+def _previewed_link(urls: list[str], preview_url: str | None) -> str | None:
+    """The link Telegram shows the preview of: the one it names, else the first one."""
+    if preview_url:
+        wanted = _same_link(preview_url)
+        for url in urls:
+            if _same_link(url) == wanted:
+                return url
+    return urls[0] if urls else None
+
+
 def link_marker(info: LinkInfo) -> str:
     head = " | ".join(x for x in (info.site_name, info.title) if x)
     body = _truncate(info.description or "", 300)
@@ -345,20 +363,40 @@ class InboundCodec:
         return marker
 
     async def _link_segments(self, message: Message) -> list[dict[str, Any]]:
-        mode = self.media_settings().link_preview
-        if mode == "off":
+        """Link previews as Telegram users see them: none when the sender turned them off.
+
+        Telegram's preview photo goes along as an image, for the one link Telegram previews.
+        """
+        settings = self.media_settings()
+        mode = settings.link_preview
+        if mode == "off" or not (message.link_preview or settings.link_preview_always):
             return []
         page = message.webpage
         if page is not None and (page.title or page.description):
-            return [_text(link_marker(LinkInfo(page.url, page.title, page.description, page.site_name)))]
+            segments = [_text(link_marker(LinkInfo(page.url, page.title, page.description, page.site_name)))]
+            if settings.link_preview_image and page.has_photo and self.links is not None:
+                segments += self._link_image(await self.links.photo(page.url, page))
+            return segments
         if self.links is None:
             return []
+        urls = urls_in(message)
+        previewed = _previewed_link(urls, message.link_preview_url)
+        if previewed is not None:
+            urls.remove(previewed)
+            urls.insert(0, previewed)
         segments = []
-        for url in urls_in(message)[:MAX_LINKS_PER_MESSAGE]:
+        for url in urls[:MAX_LINKS_PER_MESSAGE]:
             info = await self.links.describe(url, fetch=mode == "fetch")
-            if info is not None:
-                segments.append(_text(link_marker(info)))
+            if info is None:
+                continue
+            segments.append(_text(link_marker(info)))
+            if url == previewed and settings.link_preview_image and info.telegram_photo:
+                segments += self._link_image(await self.links.photo(url))
         return segments
+
+    @staticmethod
+    def _link_image(data: bytes | None) -> list[dict[str, Any]]:
+        return [_binary_segment("image", data)] if data else []
 
     # ---- public ------------------------------------------------------------------------
 

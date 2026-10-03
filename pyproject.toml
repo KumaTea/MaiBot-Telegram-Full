@@ -2,7 +2,7 @@
 # are declared in _manifest.json and installed by the MaiBot host.
 [project]
 name = "maibot-telegram-full"
-version = "0.1.2"
+version = "0.2.0"
 description = "Telethon based full-featured Telegram adapter for MaiBot"
 requires-python = ">=3.10"
 dependencies = [

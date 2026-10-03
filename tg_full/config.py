@@ -447,8 +447,10 @@ class OutboundSection(PluginConfigBase):
     long_text_ai_summary: bool = Field(
         default=True,
         description=(
-            "发布长文时，用 Telegram 的 AI 摘要（Cocoon）代替提示语作为消息正文：把正文开头发到用户账号的"
-            "收藏夹（Saved Messages），读取一次摘要后立即删除。非会员额度很少，用尽或失败时自动改用提示语"
+            "发布长文时，用 Telegram 的 AI 摘要（Cocoon）代替提示语作为消息正文：优先取 Telegram 为页面即时预览"
+            "生成的摘要（与用户在 Telegram 中打开页面时看到的相同；发布后先等 5 秒，长文每 200 字多等 1 秒，最多 20 秒，再等 5 秒重试一次）；页面太短（约 550 字以内）没有时，"
+            "改为把正文开头发到用户账号的收藏夹（Saved Messages）读取一次摘要后立即删除，这会占用非会员很少的摘要额度。"
+            "都失败时使用提示语"
         ),
         json_schema_extra=_ui(
             "长文使用 AI 摘要", "AI summary for long texts",
@@ -525,10 +527,25 @@ class MediaSection(PluginConfigBase):
         ),
         json_schema_extra=_ui("链接信息", "Link information", order=6),
     )
+    link_preview_image: bool = Field(
+        default=True,
+        description="Telegram 的链接预览带图片时一并交给 MaiBot 识别（会消耗识图额度）。只用 Telegram 预览的图片，适配器自行读取网页得到的图片不使用",
+        json_schema_extra=_ui(
+            "附上预览图片", "Preview images",
+            "Bot 需要用户账号辅助才能取得 Telegram 预览",
+            "Bots need the user account helper to get Telegram's preview",
+            order=7,
+        ),
+    )
+    link_preview_always: bool = Field(
+        default=False,
+        description="发送者关闭了链接预览（或消息是带说明文字的媒体）时也读取链接信息。关闭时与 Telegram 用户看到的一致：没有预览就不读取",
+        json_schema_extra=_ui("总是读取链接", "Always look up links", order=8),
+    )
     link_user_agents: list[str] = Field(
         default_factory=lambda: ["googlebot", "browser", "curl", "default"],
         description="读取网页时依次尝试的 User-Agent。预设：googlebot / browser / curl / default（HTTP 库默认）/ none（不发送）；也可填写完整的 UA 字符串",
-        json_schema_extra=_ui("User-Agent 顺序", "User-Agent order", order=7,
+        json_schema_extra=_ui("User-Agent 顺序", "User-Agent order", order=9,
                               depends_on="link_preview", depends_value="fetch"),
     )
     link_timeout: float = Field(
@@ -536,7 +553,7 @@ class MediaSection(PluginConfigBase):
         ge=1.0,
         le=30.0,
         description="读取网页时每次请求的超时时间（秒）",
-        json_schema_extra=_ui("网页请求超时（秒）", "Page request timeout (s)", order=8,
+        json_schema_extra=_ui("网页请求超时（秒）", "Page request timeout (s)", order=10,
                               depends_on="link_preview", depends_value="fetch"),
     )
     link_allow_private: bool = Field(
@@ -550,7 +567,7 @@ class MediaSection(PluginConfigBase):
             "fake-ip 代理（Clash / mihomo / sing-box）分配的 198.18.0.0/15 地址始终允许，无需为此开启",
             "Fake-ip proxy addresses (Clash / mihomo / sing-box, 198.18.0.0/15) are always allowed; "
             "no need to turn this on for them",
-            order=9, depends_on="link_preview", depends_value="fetch",
+            order=11, depends_on="link_preview", depends_value="fetch",
         ),
     )
 

@@ -301,7 +301,11 @@ As built:
   - `thumbnail`
   - `drop`: marker only.
 - `media.video_thumbnail` (off by default) attaches a video's thumbnail for recognition.
-- **Link previews [R18]:** Telegram's web page preview first. Otherwise two lookups run in parallel
+- **Link previews [R18]:** only for messages Telegram shows with a preview (the message has
+  `MessageMediaWebPage`; none when the sender turned it off or the link is in a media caption),
+  unless `media.link_preview_always` (0.2.0). Bots get that media with a `WebPageEmpty` in place of the
+  page (checked 2026-10-03 on the same messages from @atlasnow_bot and the helper), so the flag is
+  reliable for bots but the preview itself needs a user account. Telegram's web page preview first. Otherwise two lookups run in parallel
   (bounded together by the link timeout, keeping whatever finished in time) and each field (title,
   description, site name) takes the longer value; Telegram wins ties:
   - with a user account (the account itself, or a bot's user account helper, added in 0.1.2):
@@ -321,6 +325,12 @@ As built:
     among Telegram users) are allowed, although Python does not count them as global; behind such a
     proxy the real address is resolved by the proxy and cannot be checked. `media.link_allow_private`
     (off by default) turns the check off. Refusals are not cached.
+  - 0.2.0, `media.link_preview_image` (on by default): the photo of Telegram's preview goes along as
+    an image segment, downloaded by the user account that got the page (largest size ≤ 1280 px), for
+    the link Telegram previews only (`WebPageEmpty.url`, else the first link). The adapter's own fetch
+    never adds an image. The page is kept in memory (64 URLs); after a cache hit on the text Telegram
+    is asked again for the photo only when the cached entry says it had one. No recognition-cache
+    entry: the file belongs to the user account, so the bot cannot resend it; MaiBot dedupes by hash.
 - **Moved to Phase 6:** the sticker *tools* for the LLM ("find stickers for 😂", "send sticker").
   They need the same stream → chat resolution as the other tools. The index they need is already
   stored.
@@ -476,6 +486,16 @@ As built (`outbound/telegraph.py`):
     `to_lang=zh` for Chinese text), the temporary message is deleted, and the chat gets
     "summary + link". Since 0.1.2 bots can do this through the user account helper.
   - quota used up or any failure falls back to the notice
+  - 0.2.0: **Instant View summary first.** `messages.getWebPage(url)` on the published page returns
+    the Instant View with Telegram's own summary as a `pageBlockBlockquote` captioned
+    "Cocoon AI Summary" (after title / author-date): the summary users see in the apps, also the same
+    across accounts. Checked 2026-10-03 with fresh pages: Telegram starts on it at publishing (a
+    page first asked for 6 s after publishing already had it) and it is complete (it does not
+    stream) 2–3 s later. The adapter reads the page after `max(5, chars // 200)` s (at most 20) and
+    once more 5 s later. Pages of about 550 characters or less never get one (506 and 451 no, 553 and up yes); for
+    those it falls back to `summarizeText` via Saved Messages. Telegram's summary can be poor (one test
+    page got just "本文推荐了四种"); it is used as is, since that is what users see. Bold / links are
+    kept as entities. No layer-229 method summarizes a web page directly.
   - verified 2026-09-30: a Chinese summary came back and the temporary message was deleted. The
     fallback was verified earlier, while the quota was used up.
 - **Tool `telegram_post_long_text(title, markdown)`** (visible, because the "too long" error names

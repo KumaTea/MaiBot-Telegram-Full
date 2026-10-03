@@ -17,7 +17,15 @@ from telethon import Button, TelegramClient, errors, events, functions, types, u
 
 from ..ids import ChatTarget
 from ..text.entities import Entity
-from .convert import best_thumb, media_ref, message_from_tl, peer_from_entity, webpage_from_tl
+from .convert import (
+    best_thumb,
+    media_ref,
+    message_from_tl,
+    page_summary,
+    peer_from_entity,
+    preview_photo_size,
+    webpage_from_tl,
+)
 from .models import CallbackPress, MediaRef, Message, Peer, ReactionChange, WebPage
 
 MessageCallback = Callable[[Message], Awaitable[None]]
@@ -613,6 +621,27 @@ class TelegramBackend:
             with contextlib.suppress(Exception):
                 await self.client.delete_messages("me", [sent.id])
 
+    async def page_summary(self, url: str, waits: Sequence[float] = (5, 5)) -> tuple[str, list[Entity]] | None:
+        """Telegram's AI summary shown at the top of a just published page's Instant View, for user accounts.
+
+        Telegram starts on it when the page is published and has it complete 2–6 s later (checked
+        2026-10-03), so the page is read after each of ``waits``. Short pages (about 550 characters
+        or less) never get one. ``None`` when there is none in time.
+        """
+        if self.me is None or self.me.is_bot:
+            return None
+        for delay in waits:
+            await asyncio.sleep(delay)
+            try:
+                result = await self.client(functions.messages.GetWebPageRequest(url=url, hash=0))
+            except errors.RPCError as exc:
+                self.logger.info("No Instant View summary for %s (%s)", url, exc.message or type(exc).__name__)
+                return None
+            summary = page_summary(result.webpage)
+            if summary is not None:
+                return summary
+        return None
+
     async def web_preview(self, url: str) -> WebPage | None:
         """Telegram's own link preview of ``url``, for user accounts. Telegram's servers fetch the page.
 
@@ -628,6 +657,14 @@ class TelegramBackend:
                 return webpage_from_tl(page)  # None for no preview or one still pending
             await asyncio.sleep(delay)
         return None
+
+    async def download_webpage_photo(self, page: WebPage) -> bytes | None:
+        """The photo of a link preview this account received, at most 1280 px on its longer side."""
+        photo = getattr(page.raw, "photo", None)
+        if not isinstance(photo, types.Photo):
+            return None
+        data = await self.client.download_media(photo, file=bytes, thumb=preview_photo_size(photo))
+        return data if isinstance(data, bytes) else None
 
     async def invoke_raw(self, request: Any) -> Any:
         """Send an arbitrary MTProto request (see ``raw_api``); Telethon resolves peer-like parameters."""

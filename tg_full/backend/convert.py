@@ -8,7 +8,7 @@ from typing import Any
 from telethon import TelegramClient, utils
 from telethon.tl import types
 
-from ..text.entities import Entity
+from ..text.entities import Entity, utf16_len
 from .models import Forward, Media, MediaRef, Message, Peer, WebPage
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,67 @@ def webpage_from_message(msg: Any) -> WebPage | None:
 def webpage_from_tl(page: Any) -> WebPage | None:
     if not isinstance(page, types.WebPage):
         return None
-    return WebPage(url=page.url, site_name=page.site_name, title=page.title, description=page.description)
+    return WebPage(
+        url=page.url, site_name=page.site_name, title=page.title, description=page.description,
+        has_photo=isinstance(page.photo, types.Photo), raw=page,
+    )
+
+
+# Instant View rich text wrappers that map to message entities.
+_RICH_ENTITIES = {
+    types.TextBold: "bold", types.TextItalic: "italic", types.TextUnderline: "underline",
+    types.TextStrike: "strikethrough", types.TextFixed: "code",
+}
+
+
+def rich_text(text: Any) -> tuple[str, list[Entity]]:
+    """Plain text and entities of an Instant View ``RichText`` (unknown wrappers keep their text)."""
+    parts: list[str] = []
+    entities: list[Entity] = []
+    offset = 0
+
+    def walk(node: Any) -> None:
+        nonlocal offset
+        if node is None or isinstance(node, types.TextEmpty):
+            return
+        if isinstance(node, str):
+            parts.append(node)
+            offset += utf16_len(node)
+        elif isinstance(node, types.TextConcat):
+            for child in node.texts:
+                walk(child)
+        else:
+            start = offset
+            walk(getattr(node, "text", None))
+            kind = "text_url" if isinstance(node, types.TextUrl) else _RICH_ENTITIES.get(type(node))
+            if kind and offset > start:
+                entities.append(Entity(kind, start, offset - start, url=getattr(node, "url", None)))
+
+    walk(text)
+    return "".join(parts), sorted(entities, key=lambda e: (e.offset, -e.length))
+
+
+def page_summary(page: Any) -> tuple[str, list[Entity]] | None:
+    """Telegram's AI summary at the top of an Instant View page (a quote captioned "… AI Summary")."""
+    for block in getattr(getattr(page, "cached_page", None), "blocks", None) or []:
+        if isinstance(block, types.PageBlockBlockquote) and "summary" in rich_text(block.caption)[0].lower():
+            text, entities = rich_text(block.text)
+            stripped = text.strip()
+            if stripped:
+                lead = utf16_len(text[: len(text) - len(text.lstrip())])
+                return stripped, [e.moved(e.offset - lead, e.length) for e in entities if e.offset >= lead]
+    return None
+
+
+def preview_photo_size(photo: Any, limit: int = 1280) -> str | None:
+    """Type of the largest size of ``photo`` within ``limit`` px (else its smallest real size)."""
+    sizes = [s for s in photo.sizes if isinstance(s, (types.PhotoSize, types.PhotoSizeProgressive))]
+    if not sizes:
+        return None
+    fitting = [s for s in sizes if max(s.w, s.h) <= limit]
+    if fitting:
+        return max(fitting, key=lambda s: max(s.w, s.h)).type
+    return min(sizes, key=lambda s: max(s.w, s.h)).type
 
 
 async def _get_entity_for_peer(client: TelegramClient, peer: Any) -> Any:
@@ -249,6 +309,8 @@ async def message_from_tl(client: TelegramClient, msg: Any, *, resolve_reply: bo
         forward=await forward_from_message(client, msg),
         media=media_from_message(msg),
         webpage=webpage_from_message(msg),
+        link_preview=isinstance(msg.media, types.MessageMediaWebPage),
+        link_preview_url=getattr(getattr(msg.media, "webpage", None), "url", None) or None,
         topic_id=topic_id,
         edit_date=msg.edit_date,
         grouped_id=msg.grouped_id,

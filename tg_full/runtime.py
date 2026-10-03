@@ -24,9 +24,17 @@ from .inbound.pipeline import InboundPipeline
 from .media.cache import MediaCache
 from .media.link_preview import LinkPreviewer
 from .outbound.sender import OutboundSender
-from .outbound.telegraph import TelegraphClient, TelegraphError, derive_title, summary_excerpt, summary_language
+from .outbound.telegraph import (
+    TelegraphClient,
+    TelegraphError,
+    derive_title,
+    plain_text,
+    summary_excerpt,
+    summary_language,
+)
 from .store import Store
 from .streams import StreamResolver
+from .text.entities import Entity
 from .text.latex import latex_to_plain
 from .text.length import check_length
 from .text.md_out import render
@@ -494,18 +502,14 @@ class AdapterRuntime:
         if send_link and stream_id:
             target = await self._target(stream_id)
             settings = self.config().outbound
-            summary = None
-            user = self._user_account()
-            if settings.long_text_ai_summary and user is not None:
-                excerpt = summary_excerpt(markdown)
-                summary = await user.summarize_text(excerpt, summary_language(excerpt))
+            summary, entities = await self._long_text_summary(url, markdown)
             if summary and len(summary) > 3500:
-                summary = summary[:3500].rstrip() + "…"  # keep room for the link within 4096
+                summary, entities = summary[:3500].rstrip() + "…", []  # keep room for the link within 4096
             notice = summary or settings.long_text_notice.strip()
             text = f"{notice}\n{url}" if notice else url
             if summary:
                 result["summary"] = summary
-            msg_id = await backend.send_text(target, text, link_preview=True)
+            msg_id = await backend.send_text(target, text, entities, link_preview=True)
             await self.store.record_message(
                 target.chat_id, msg_id, self.me.id, self.me.is_bot, is_outgoing=True, routed=True,
                 topic_id=target.topic_id, text=f"{notice} {title} {url}".strip(),
@@ -517,6 +521,25 @@ class AdapterRuntime:
             result["content"] = f"已发布到 Telegraph：{url}"
         result["content"] += "。之后可用 telegram_edit_long_text 修改或清空这个页面"
         return result
+
+    async def _long_text_summary(self, url: str, markdown: str) -> tuple[str | None, list[Entity]]:
+        """Telegram's AI summary of a published page, as users see it atop its Instant View.
+
+        Pages too short for one, or slow to get one, are summarized as a message instead: the text
+        goes to the account's Saved Messages (``summarize_text``), which uses the account's small
+        summary quota.
+        """
+        user = self._user_account()
+        if not self.config().outbound.long_text_ai_summary or user is None:
+            return None, []
+        # Longer pages take longer to summarize: first look after 1 s per 200 characters (5–20 s).
+        first = min(max(5, len(plain_text(markdown)) // 200), 20)
+        found = await user.page_summary(url, (first, 5))
+        if found is not None:
+            self.logger.info("Using the Instant View summary of %s", url)
+            return found
+        excerpt = summary_excerpt(markdown)
+        return await user.summarize_text(excerpt, summary_language(excerpt)), []
 
     async def edit_long_text(self, page: str, markdown: str = "", title: str = "", clear: bool = False) -> dict[str, Any]:
         """Replace or clear a Telegraph page this adapter published; its link stays the same."""

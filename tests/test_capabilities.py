@@ -127,6 +127,8 @@ async def test_web_preview_waits_for_pending_pages(tmp_path, monkeypatch):
     preview = await backend.web_preview("https://x.io")
     assert (preview.title, preview.site_name) == ("X", "Site")
 
+    assert not preview.has_photo
+
     backend.client = _FakeTL([pending] * 4)
     assert await backend.web_preview("https://x.io") is None  # still pending after about 7 s
     backend.me = ME
@@ -155,3 +157,122 @@ def test_user_account_is_the_account_itself_or_the_bots_helper():
     assert runtime._user_account() is None  # helper offline: fall back as before
     runtime.helper = account(ALICE)
     assert runtime._user_account() is runtime.helper
+
+
+def test_preview_photo_size_and_message_preview_flags():
+    from tg_full.backend.convert import preview_photo_size
+
+    def size(kind, side):
+        return types.PhotoSize(type=kind, w=side, h=side * 3 // 4, size=side * 100)
+
+    photo = types.Photo(id=1, access_hash=2, file_reference=b"", date=None, dc_id=1, sizes=[
+        types.PhotoStrippedSize(type="i", bytes=b"x"), size("m", 320), size("x", 800),
+        types.PhotoSizeProgressive(type="y", w=1280, h=960, sizes=[1, 2]), size("w", 2560),
+    ])
+    assert preview_photo_size(photo) == "y"
+    photo.sizes = [size("w", 2560), size("z", 1600)]
+    assert preview_photo_size(photo) == "z"  # nothing fits: the smallest
+
+
+# ---- Instant View summary --------------------------------------------------------------------
+
+
+def _iv_page(*blocks):
+    return types.WebPage(id=1, url="https://telegra.ph/x", display_url="telegra.ph/x", hash=0, title="X",
+                         cached_page=types.Page(url="https://telegra.ph/x", blocks=list(blocks), photos=[], documents=[]))
+
+
+_SUMMARY = types.PageBlockBlockquote(
+    text=types.TextConcat(texts=[
+        types.TextPlain(text=" 入门："), types.TextBold(text=types.TextPlain(text="车辆😀")),
+        types.TextPlain(text="——选城市车；"), types.TextUrl(text=types.TextPlain(text="链接"), url="https://a.io", webpage_id=0),
+    ]),
+    caption=types.TextPlain(text="Cocoon AI Summary"),
+)
+
+
+def test_page_summary_is_the_captioned_quote_with_its_formatting():
+    from tg_full.backend.convert import page_summary
+    from tg_full.text.entities import Entity
+
+    title = types.PageBlockTitle(text=types.TextPlain(text="标题"))
+    quote = types.PageBlockBlockquote(text=types.TextPlain(text="作者的引用"), caption=types.TextEmpty())
+    text, entities = page_summary(_iv_page(types.PageBlockUnsupported(), title, quote, _SUMMARY))
+    assert text == "入门：车辆😀——选城市车；链接"
+    assert entities == [Entity("bold", 3, 4), Entity("text_url", 14, 2, url="https://a.io")]  # UTF-16 units
+    assert page_summary(_iv_page(title, quote)) is None
+    assert page_summary(types.WebPageEmpty(id=1)) is None
+
+
+class _FakePages:
+    def __init__(self, pages):
+        self.pages, self.asked = list(pages), 0
+
+    async def __call__(self, request):
+        assert isinstance(request, functions.messages.GetWebPageRequest)
+        self.asked += 1
+        return types.messages.WebPage(webpage=self.pages.pop(0), chats=[], users=[])
+
+
+async def test_instant_view_summary_is_read_after_each_wait(tmp_path, monkeypatch):
+    import logging
+
+    from conftest import ALICE, ME
+
+    from tg_full.backend import client as client_module
+    from tg_full.backend.client import TelegramBackend
+
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(client_module.asyncio, "sleep", fake_sleep)
+    backend = TelegramBackend(session_path=tmp_path / "h.session", api_id=1, api_hash="x", receive_updates=False,
+                              logger=logging.getLogger("t"))
+    backend.me = ALICE
+    backend.client = _FakePages([_iv_page(), _iv_page(_SUMMARY)])
+    text, _ = await backend.page_summary("https://telegra.ph/x")
+    assert text.startswith("入门") and slept == [5, 5]
+
+    backend.client = _FakePages([_iv_page()] * 2)
+    assert await backend.page_summary("https://telegra.ph/x", (8, 5)) is None
+    assert backend.client.asked == 2 and slept == [5, 5, 8, 5]
+    backend.me = ME
+    assert await backend.page_summary("https://telegra.ph/x") is None  # bots cannot ask
+
+
+async def test_long_text_summary_prefers_instant_view_then_falls_back():
+    import logging
+
+    from conftest import ALICE
+
+    from tg_full.config import TelegramFullConfig
+    from tg_full.runtime import AdapterRuntime
+
+    class Account:
+        me, summarized = ALICE, []
+
+        def __init__(self, found):
+            self.found = found
+
+        def is_connected(self):
+            return True
+
+        async def page_summary(self, url, waits):
+            self.waits = waits
+            return self.found
+
+        async def summarize_text(self, text, to_lang=None):
+            self.summarized.append((text, to_lang))
+            return "消息摘要"
+
+    runtime = AdapterRuntime(None, TelegramFullConfig, logging.getLogger("t"))
+    runtime.backend = Account(("页面摘要", []))
+    assert await runtime._long_text_summary("https://telegra.ph/x", "正文内容") == ("页面摘要", [])
+    assert Account.summarized == [] and runtime.backend.waits == (5, 5)  # no summary quota used
+    await runtime._long_text_summary("https://telegra.ph/x", "长" * 2400)
+    assert runtime.backend.waits == (12, 5)  # longer pages: first look later
+    runtime.backend = Account(None)
+    assert await runtime._long_text_summary("https://telegra.ph/x", "正文内容") == ("消息摘要", [])
+    assert Account.summarized == [("正文内容", "zh")]

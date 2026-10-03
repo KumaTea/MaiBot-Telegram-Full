@@ -84,3 +84,49 @@ https://github.com/Mai-with-u/plugin-repo/issues/718#issuecomment-5939601090
 Tell me if you can't read the comment.
 
 Oh, fake-ip's default 198.18.0.1/16 might not be affected by lo's 127.0.0.1 and lan's 10.x, 172.x and 192.x. However before we enabled that we did test and fail. You may further look at it. And, we can bump the version to 0.1.1.
+
+---
+
+Just discussing, do not code: Do you think it's a good idea to add a switch for utilizing a secondary user account?
+That is, if a user switch this on and fill both a bot token and user tokens like phone number and 2FA passwords, the bot will still operates on behalf of the bot account, however, for some read rather than write operations that only user account can do, just like get the summary text, the adapter can utilize the user session to get those
+information.
+Please check first the feasibility, second the effort of implementing this, and third if it fit some design style of elegance, that is, don't be too complex to add a function.
+
+We won't touch anything that needs the bot chat or what you said, ID translation, nor anything that needs a premium account. Completely dismiss, not even future plan. For the narrow form or the (currently only) two use cases, the AI summary and link preview, that's all I want to achieve. If it is just a switch's effort, and when the bot needs to get such summaries or previews, it check if the secondary switch is on, and the user section is available, and if yes, it utilizes the user account to do that, that's what I want. So, this can be our 0.1.2 update.
+
+Oh yes, even with user account available, don't just skip our web preview process, since a web request is almost free, after all we are not downloading something. We can compare which is more rich in preview content (although mostly same or Telegram's better, which is essentially another Googlebot / Twitterbot). An asyncio gather, I think. How do you think? Just my opinion.
+
+By saying comparing, no built in AI function should be involved. A better option is to check which has better code (200? vs 4xx/5xx), or simply which is longer. A worse option is pass both to maibot core.
+
+Thanks, I have commited and deployed. Just for curiosity, can Teletion session be signed out, or I can only remove the session on my other phones? And, does it feature a timeout for logged in session (not Telegram's global 6mo-2yr, but something like 30d)? And if there is a log out function, please help me log out and delete `kuma_ai`, `kuma_ai_2` and any obsolete sessions.
+
+Another tiny question: Does Maibot WebUI support input type=password? If so our 2fa password will not be displayed as plain text.
+
+Does Maibot's manifest file support arch / os specific dependencies declaration? If so, please modify cryptg with its available prebuilt wheels, and add `uvloop` for non windows hosts. If not, nevermind.
+
+---
+
+Recently we updated our v0.1.2 that added a secondary user account for AI summary and web preview.
+
+1. A minor question that does not affect anything, just I'm curious, the fetched AI summary is different from what I see.
+For example, I requested a "https://telegra.ph/凌晨五点被迫营业6张测试图片速览-10-02". The fetched summary is "凌晨五点针对六张地标、展品及影视道具图片进行OCR识别测试，其中朱辛庄CITY地标因识别误
+差将“ZHUXINZHUANG”误读为“ZHUANC”。其余五张图片涵盖环球影城、华侨博物馆、北京副中心导览、港大会堂及疯狂动物城启事，均展现了鲜明的场景特征与视觉细节。". The summary I see (both same from my main
+account and the secondary account, which is the very account that is used to fetch) is
+"作者于2026年10月2日凌晨五点进行OCR识别测试，速览了6张图片内容。其中，朱辛庄地标识别出现将“G”误认为“C”的错误；其余5张分别展示了环球影城英文告示、中国华侨历史博物馆特展、北京城市副中心指示牌、香
+港大学大会堂门脸以及迪士尼《疯狂动物城》寻蛇启事，涵盖了从现实地标到虚拟IP道具的多种场景。文章最后以调侃语气呼吁测试开发者尽快结束工作休息。". They are similar, though, but why is it different?
+I can confirm no my own AI API is requested during that process by checking log. So just a question of why. If you are going to test don't forget the rate limit that an account can request
+**new** AI summary 5 times in a period of time, don't know 1 hour or half a day.
+2. A minor update I want: For web preview with secondary user account support, sometimes it will comes with an image. If the adapter / core supports (either as an supplement to the message, or
+dispatch as a new notification / system message), we should attach that preview to maintain the same experience like normal users. Likewise, if there is an image by our own fetch but none from
+Telegram, we should not attach. And further, if possible to get if a user enables or disables the web preview (like, the main bot and the helper user happen to be in the same group), then this
+on or of should be our first consideration of getting preview or not (i.e. if user turns off, no need to get preview). There can also be a switch for "always get preview).
+
+Can we just get this "Instant View summary" rather than post the text into somewhere and call a get summary API? From the beginning I was expecting such a same summary a user will see when they click into the telegraph page **inside Telegram clients**. But if we cannot, then the current approach is fine.
+
+"So the adapter asks at 0 s, 3 s and 5 s, as you suggested" I'd rather suggest wait for 5s after published at first, and another try at 10s. 0s and 3s are too short. You can also choose the
+first interval to be `int(len(text)/200)`.
+We will use Telegram's summary as is. No other user's specific API has so limited quota like the previous get summary text. And I'm afraid Telegram making it premium only. Getting Telegraph's
+own generated summary like we get a message fits our development philosophy.
+And please print out the test telegraph link to let me check again.
+
+Please note this in the project's CLAUDE.md: you can always re-deploy when you want or finish a version.

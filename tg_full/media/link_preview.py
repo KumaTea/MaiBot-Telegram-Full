@@ -13,6 +13,9 @@ one where it is longer:
 Only http(s) links are looked up, and only the first 512 KB of HTML is read. Results, including
 "nothing found", are cached for a day.
 
+Only Telegram's preview contributes a photo (``photo``), so MaiBot sees the image a Telegram user
+sees; images of the adapter's own fetch (``og:image``) are not used.
+
 Anyone in a chat can post a link, so by default hosts that resolve to loopback, LAN, link-local
 (cloud metadata) or other non-public addresses are refused, including on every redirect hop. The
 check runs in the connector's resolver, so the connection uses exactly the addresses checked.
@@ -28,6 +31,7 @@ import ipaddress
 import logging
 import re
 import socket
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
@@ -55,6 +59,7 @@ _MAX_BYTES = 512 * 1024
 _MAX_REDIRECTS = 4
 _REDIRECTS = (301, 302, 303, 307, 308)
 _CACHE_SECONDS = 24 * 3600
+_PAGES_KEPT = 64
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,7 @@ class LinkInfo:
     title: str | None = None
     description: str | None = None
     site_name: str | None = None
+    telegram_photo: bool = False  # Telegram's preview has a photo
 
 
 class _MetaParser(HTMLParser):
@@ -122,6 +128,8 @@ def parse_html_meta(url: str, html: str) -> LinkInfo:
 class UserAccount(Protocol):
     async def web_preview(self, url: str) -> WebPage | None: ...
 
+    async def download_webpage_photo(self, page: WebPage) -> bytes | None: ...
+
 
 class LinkPreviewer:
     def __init__(
@@ -135,6 +143,7 @@ class LinkPreviewer:
         self.settings = settings
         self.logger = logger
         self.user_account = user_account
+        self._pages: OrderedDict[str, WebPage] = OrderedDict()  # Telegram's recent previews, for photos
 
     async def describe(self, url: str, fetch: bool = True) -> LinkInfo | None:
         """Telegram's preview through a user account and (with ``fetch``) the page itself, in parallel."""
@@ -174,7 +183,35 @@ class LinkPreviewer:
             return None
         if page is None or not (page.title or page.description):
             return None
-        return LinkInfo(url, page.title, page.description, page.site_name)
+        self._remember(url, page)
+        return LinkInfo(url, page.title, page.description, page.site_name, page.has_photo)
+
+    def _remember(self, url: str, page: WebPage) -> None:
+        self._pages[url] = page
+        self._pages.move_to_end(url)
+        while len(self._pages) > _PAGES_KEPT:
+            self._pages.popitem(last=False)
+
+    async def photo(self, url: str, page: WebPage | None = None) -> bytes | None:
+        """The photo of Telegram's preview of ``url`` (``page``, if already known), via the user account."""
+        account = self.user_account()
+        if account is None:
+            return None
+        known = page or self._pages.pop(url, None)
+        if known is not None:
+            try:
+                return await account.download_webpage_photo(known) if known.has_photo else None
+            except Exception as exc:  # e.g. an expired file reference: ask Telegram for the page again
+                self.logger.debug("Telegram preview photo of %s failed: %r", url, exc)
+        try:
+            page = await account.web_preview(url)
+            if page is None:
+                return None
+            self._remember(url, page)
+            return await account.download_webpage_photo(page) if page.has_photo else None
+        except Exception as exc:
+            self.logger.debug("Telegram preview photo of %s failed: %r", url, exc)
+            return None
 
     async def _fetch(self, url: str, settings: MediaSection) -> LinkInfo | None:
         for agent in settings.link_user_agents or ["default"]:
@@ -236,7 +273,8 @@ def _merge(url: str, results: list[LinkInfo | None]) -> LinkInfo | None:
     def longest(field: str) -> str | None:
         return max((getattr(info, field) or "" for info in found), key=len) or None
 
-    return LinkInfo(url, longest("title"), longest("description"), longest("site_name"))
+    photo = any(info.telegram_photo for info in found)
+    return LinkInfo(url, longest("title"), longest("description"), longest("site_name"), photo)
 
 
 class _NotPage(Exception):
