@@ -69,6 +69,7 @@ class LinkInfo:
     description: str | None = None
     site_name: str | None = None
     telegram_photo: bool = False  # Telegram's preview has a photo
+    ai_summary: bool = False  # the description is Telegram's AI summary of the page (Instant View)
 
 
 class _MetaParser(HTMLParser):
@@ -123,6 +124,12 @@ def parse_html_meta(url: str, html: str) -> LinkInfo:
         description=first("og:description", "twitter:description", "description"),
         site_name=first("og:site_name", "application-name"),
     )
+
+
+def link_info(url: str, page: WebPage) -> LinkInfo:
+    """A Telegram preview as link info; its AI summary, when there is one, stands for the description."""
+    description = page.summary or page.description
+    return LinkInfo(url, page.title, description, page.site_name, page.has_photo, ai_summary=bool(page.summary))
 
 
 class UserAccount(Protocol):
@@ -181,10 +188,10 @@ class LinkPreviewer:
         except Exception as exc:
             self.logger.debug("Telegram preview of %s failed: %r", url, exc)
             return None
-        if page is None or not (page.title or page.description):
+        if page is None or not (page.title or page.description or page.summary):
             return None
         self._remember(url, page)
-        return LinkInfo(url, page.title, page.description, page.site_name, page.has_photo)
+        return link_info(url, page)
 
     def _remember(self, url: str, page: WebPage) -> None:
         self._pages[url] = page
@@ -265,7 +272,10 @@ class LinkPreviewer:
 
 
 def _merge(url: str, results: list[LinkInfo | None]) -> LinkInfo | None:
-    """Each field from the result where it is longest (Telegram's, listed first, wins ties)."""
+    """Each field from the result where it is longest (Telegram's, listed first, wins ties).
+
+    Telegram's AI summary always wins the description: it covers the whole page, not its opening.
+    """
     found = [info for info in results if info is not None]
     if not found:
         return None
@@ -274,7 +284,9 @@ def _merge(url: str, results: list[LinkInfo | None]) -> LinkInfo | None:
         return max((getattr(info, field) or "" for info in found), key=len) or None
 
     photo = any(info.telegram_photo for info in found)
-    return LinkInfo(url, longest("title"), longest("description"), longest("site_name"), photo)
+    summary = next((info.description for info in found if info.ai_summary), None)
+    description = summary or longest("description")
+    return LinkInfo(url, longest("title"), description, longest("site_name"), photo, ai_summary=bool(summary))
 
 
 class _NotPage(Exception):

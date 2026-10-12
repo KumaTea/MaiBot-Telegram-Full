@@ -191,6 +191,32 @@ _SUMMARY = types.PageBlockBlockquote(
 )
 
 
+def test_reactions_are_counted_per_emoji_with_the_latest_reactors_first():
+    from datetime import datetime, timedelta, timezone
+
+    from tg_full.backend.convert import reactions_from_message
+    from tg_full.backend.models import RecentReaction
+
+    t = datetime(2026, 10, 4, tzinfo=timezone.utc)
+    custom = types.ReactionCustomEmoji(document_id=1)
+    reactions = types.MessageReactions(
+        results=[
+            types.ReactionCount(types.ReactionEmoji("👍"), 2, chosen_order=0),
+            types.ReactionCount(custom, 1),
+            types.ReactionCount(types.ReactionCustomEmoji(document_id=2), 2),
+        ],
+        recent_reactions=[
+            types.MessagePeerReaction(types.PeerUser(1), t, types.ReactionEmoji("👍"), my=True),
+            types.MessagePeerReaction(types.PeerUser(2), t + timedelta(seconds=5), custom, big=True),
+        ],
+    )
+    message = types.Message(id=1, peer_id=types.PeerUser(1), date=t, message="", reactions=reactions)
+    counts, recent = reactions_from_message(message)
+    assert counts == {"👍": 2, "[自定义表情]": 3}
+    assert recent == [RecentReaction("[自定义表情]", 2, big=True), RecentReaction("👍", 1, mine=True)]
+    assert reactions_from_message(types.Message(id=1, peer_id=types.PeerUser(1), date=t, message="")) == ({}, [])
+
+
 def test_page_summary_is_the_captioned_quote_with_its_formatting():
     from tg_full.backend.convert import page_summary
     from tg_full.text.entities import Entity
@@ -201,6 +227,9 @@ def test_page_summary_is_the_captioned_quote_with_its_formatting():
     assert text == "入门：车辆😀——选城市车；链接"
     assert entities == [Entity("bold", 3, 4), Entity("text_url", 14, 2, url="https://a.io")]  # UTF-16 units
     assert page_summary(_iv_page(title, quote)) is None
+    from tg_full.backend.convert import webpage_from_tl
+    assert webpage_from_tl(_iv_page(title, _SUMMARY)).summary == "入门：车辆😀——选城市车；链接"
+    assert webpage_from_tl(_iv_page(title)).summary is None
     assert page_summary(types.WebPageEmpty(id=1)) is None
 
 

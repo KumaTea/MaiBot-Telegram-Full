@@ -4,10 +4,11 @@
 * Edits (R7) replace a still-queued message, or become a debounced notice for one MaiBot has seen.
 * Deletions drop a still-queued message, or become a notice for one MaiBot has seen.
 * Typing (R9) holds a chat's queue.
-* History polling (R11), for bots by default, re-reads recent messages to find edits and
-  deletions, with doubling gaps per message; changes only update MaiBot's context and never
-  trigger a reply (R11.2).
-* Reactions (R20) become notices or context lines, depending on ``inbound.reactions``.
+* History polling (R11), for bots by default, re-reads recent messages to find edits,
+  deletions and new reactions, with doubling gaps per message; edits and deletions only update
+  MaiBot's context and never trigger a reply (R11.2).
+* Reactions (R20), live or found by polling, become notices or context lines, depending on
+  ``inbound.reactions``.
 * Button presses (R29) are dropped unless their data matches a registered pattern.
 """
 
@@ -110,6 +111,7 @@ class InboundPipeline:
         await self.store.record_message(
             message.chat.id, message.id, sender.id if sender else None, bool(sender and sender.is_bot),
             is_outgoing=message.outgoing, routed=False, date=message.date.timestamp(), topic_id=message.topic_id,
+            reactions=message.reactions,
         )
         settings = self.config()
         reason = drop_reason(message, self.me, settings.inbound)
@@ -178,12 +180,30 @@ class InboundPipeline:
             self.dispatcher.typing(chat_id, user_id, active)
 
     async def on_reaction(self, change: ReactionChange) -> None:
-        mode = self.config().inbound.reactions
-        if mode == "off" or (change.actor is not None and change.actor.id == self.me.id):
+        if change.actor is not None and change.actor.id == self.me.id:
             return
         meta = await self.store.get_message_meta(change.chat_id, change.msg_id)
         if meta is None or not meta["routed"]:
             return  # a message MaiBot never saw
+        await self._count_reaction(change.chat_id, change.msg_id, meta, change.emoji)
+        await self._report_reaction(change, meta)
+
+    async def own_reaction(self, chat_id: int, msg_id: int, emoji: str) -> None:
+        """MaiBot reacted to a message: history polling must not report it as someone else's."""
+        meta = await self.store.get_message_meta(chat_id, msg_id)
+        if meta is not None:
+            await self._count_reaction(chat_id, msg_id, meta, emoji)
+
+    async def _count_reaction(self, chat_id: int, msg_id: int, meta: dict[str, Any], emoji: str) -> None:
+        """Add a reaction that was already handled to the counts history polling compares against."""
+        counts = meta["reactions"]
+        if counts is not None:
+            await self.store.set_reactions(chat_id, msg_id, {**counts, emoji: counts.get(emoji, 0) + 1})
+
+    async def _report_reaction(self, change: ReactionChange, meta: dict[str, Any], key_suffix: str = "") -> None:
+        mode = self.config().inbound.reactions
+        if mode == "off":
+            return
         own = bool(meta["is_outgoing"]) or meta["sender_id"] == self.me.id
         actor = change.actor.name if change.actor is not None else "有人"
         target = "你的消息" if own else f"{meta['sender_name'] or '某人'}的消息"
@@ -197,7 +217,8 @@ class InboundPipeline:
             notice = Notice(
                 chat=peer, topic_id=meta["topic_id"],
                 actor_id=str(change.actor.id) if change.actor else str(change.chat_id), actor_name=actor, text=text,
-                key=f"{change.chat_id}:{change.msg_id}:reaction:{change.actor.id if change.actor else 0}:{change.emoji}",
+                key=f"{change.chat_id}:{change.msg_id}:reaction:{change.actor.id if change.actor else 0}:{change.emoji}"
+                f"{key_suffix}",
             )
             self.dispatcher.add(Item(change.chat_id, notice=notice, urgent=own))
         else:
@@ -378,3 +399,37 @@ class InboundPipeline:
                         await self.append_context(
                             chat_id, meta["topic_id"], f"[消息编辑] {self._author(meta)}编辑了消息: {change}"
                         )
+                    meta = {**meta, "text": snapshot}
+                await self._poll_reactions(message, meta)
+
+    async def _poll_reactions(self, message: Message, meta: dict[str, Any]) -> None:
+        """Report reactions added since the last read: bots get no live reactions unless they are admins.
+
+        Reactors are named when Telegram lists enough of them, otherwise the new reactions on a
+        message are reported together without a name ("👍×2 ❤️").
+        """
+        chat_id, msg_id, old = message.chat.id, message.id, meta["reactions"]
+        if old == message.reactions:
+            return
+        await self.store.set_reactions(chat_id, msg_id, message.reactions)
+        if old is None:
+            return  # recorded before reactions were tracked: what is there now is the baseline
+        added = {e: n - old.get(e, 0) for e, n in message.reactions.items() if n > old.get(e, 0)}
+        if not added:
+            return
+        self.logger.info("History poll: message %s/%s got reactions %s", chat_id, msg_id, added)
+        changes: list[ReactionChange] = []
+        unnamed: dict[str, int] = {}
+        for emoji, count in added.items():
+            reactors = [r for r in message.recent_reactions if r.emoji == emoji and not r.mine][:count]
+            if len(reactors) < count:
+                unnamed[emoji] = count
+                continue
+            for reactor in reactors:
+                changes.append(ReactionChange(chat_id, msg_id, emoji, await self.backend.peer(reactor.peer_id), reactor.big))
+        if unnamed:
+            emoji = " ".join(e if n == 1 else f"{e}×{n}" for e, n in unnamed.items())
+            changes.append(ReactionChange(chat_id, msg_id, emoji))
+        suffix = f":poll{sum(message.reactions.values())}"  # the same emoji can come again later
+        for change in changes:
+            await self._report_reaction(change, meta, suffix)

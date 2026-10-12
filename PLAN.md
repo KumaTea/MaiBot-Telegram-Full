@@ -397,6 +397,13 @@ As built:
   - user accounts: the latest reactors from `UpdateMessageReactions` (entries newer than 2 minutes
     and not seen before, including the `big` flag); counts when Telegram hides who reacted
   - bots: `UpdateBotMessageReaction` (the bot must be an admin), with no `big` flag
+  - history polling [R11] also finds new reactions (added 2026-10-04; until then only edits and
+    deletions were checked). `msg_meta.reactions` (schema v5) keeps the counts per emoji last seen;
+    live reactions and MaiBot's own (`telegram_react`) are added to it, so they are not reported
+    twice. New reactors are named when `recent_reactions` lists enough of them (`my` entries
+    skipped), otherwise one unnamed line per message ("有人回应了…: 👍×2 ❤️"). They go through the
+    same `inbound.reactions` rules as live ones. Rows from before v5 take their first read as the
+    baseline. Found reactions lag by up to the current poll gap (1–16 × `poll_interval`).
   - only for messages MaiBot has seen
 - **Reactions out [R20]:** Tool `telegram_react(msg_id, emoji, big)` (visible) and API `react`.
   Rejected emoji return the list of standard reactions.
@@ -428,6 +435,20 @@ As built. Tools are for the LLM; APIs are for other plugins, called as `kumatea.
 | `telegram_chat_info` (deferred) | `get_chat_info` | title, type, username, member count, description |
 | `telegram_raw_api` (deferred, **off**) | `raw_invoke` | any MTProto method [R4.1, R4.2] |
 | — | `register_callback_pattern` / `unregister_callback_pattern` | button callbacks (Phase 5) |
+
+- **Message id aliases** (found 2026-10-08): Maisaka (seen in MaiBot 1.3.4) shows the model every message
+  id longer than 12 characters as `m` + 6 base32 characters of its SHA-1 (`mhdi2lw`), all of ours
+  included, and maps aliases in tool arguments back only for messages in the session's current
+  `_chat_history`. Aliases of other messages reach plugin tools unchanged. Typical case: a reply
+  quotes a message MaiBot's ban words filtered, or one from before the bot joined, so the model
+  sees `quote="mhdi2lw"` and calls `telegram_get_message` on it. `msg_id` arguments of
+  `telegram_get_message` and `telegram_react` therefore also accept aliases (`ids.message_alias`
+  mirrors MaiBot's function). We first check messages in our store for that chat, newest first;
+  failing that, the 200k ids below the newest one (Telegram numbers a chat's messages in sequence,
+  about 1 s in a worker thread, false-match odds about 2×10⁻⁴). Verified on the live chat: the
+  three aliases that had failed decoded to the right messages, including one (99276) that only
+  MaiBot's `reply_to` recorded. MaiBot's own `reply` tool needs its target in the history and
+  passes full ids to the adapter, so the outbound path needs nothing.
 
 - **Raw MTProto** (`backend/raw_api.py`, config section `advanced` / 高级):
   - off by default. The SDK always registers tools as enabled, so the plugin disables the tool
@@ -496,6 +517,11 @@ As built (`outbound/telegraph.py`):
     those it falls back to `summarizeText` via Saved Messages. Telegram's summary can be poor (one test
     page got just "本文推荐了四种"); it is used as is, since that is what users see. Bold / links are
     kept as entities. No layer-229 method summarizes a web page directly.
+  - The same summary is used for link previews: `getWebPagePreview` (and a user account's own
+    messages) include `cached_page` once Telegram has built it, so `WebPage.summary` comes for free
+    and replaces the description ("AI 摘要：…", up to 500 characters). Telegram regenerates the summary
+    when it refreshes a page (checked 2026-10-04: new text for one page, briefly none for another);
+    without one the usual description is used.
   - verified 2026-09-30: a Chinese summary came back and the temporary message was deleted. The
     fallback was verified earlier, while the quota was used up.
 - **Tool `telegram_post_long_text(title, markdown)`** (visible, because the "too long" error names

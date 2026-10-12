@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from conftest import ALICE, GROUP, ME, make_message
 
+from tg_full.backend.models import ReactionChange, RecentReaction
 from tg_full.config import DispatchSection, InboundSection, MediaSection, TelegramFullConfig
 from tg_full.inbound.codec import InboundCodec
 from tg_full.inbound.dispatcher import ChatState, Debouncer, Dispatcher, Item, adaptive_threshold, next_action
@@ -162,7 +163,7 @@ class FakeBackend:
         self.polled = polled or {}
 
     async def peer(self, chat_id):
-        return GROUP if chat_id == GROUP.id else None
+        return {GROUP.id: GROUP, ALICE.id: ALICE}.get(chat_id)
 
     async def get_messages(self, chat_id, ids):
         return [self.polled.get(i) for i in ids]
@@ -279,6 +280,41 @@ async def test_poll_reports_changes_as_context_only(tmp_path):
         ("s-group", "[消息删除] Alice发送的一条消息被删除了: 「gone」"),
         ("s-group", "[消息编辑] Alice编辑了消息: 「orig」→「changed」"),
     ]
+    await pipeline.close()
+    await store.close()
+
+
+async def test_poll_reports_new_reactions_once(tmp_path):
+    now = datetime.now(timezone.utc)
+    pipeline, host, store = await make_pipeline(tmp_path)
+    await pipeline.on_message(make_message("orig", id=3, date=now))
+    await store.record_message(GROUP.id, 4, ME.id, True, is_outgoing=True, routed=True, text="my reply")
+    await store.record_message(GROUP.id, 5, ME.id, True, is_outgoing=True, routed=True, text="older")
+    await store.execute("UPDATE msg_meta SET reactions = NULL WHERE msg_id = 5")  # stored before tracking began
+    await asyncio.sleep(0.05)
+    routed = len(host.routed)
+    await pipeline.own_reaction(GROUP.id, 3, "👍")  # MaiBot's own reaction is not reported
+
+    mine, alice = RecentReaction("👍", ME.id, mine=True), RecentReaction("👍", ALICE.id)
+    pipeline.backend.polled = {
+        3: make_message("orig", id=3, date=now, reactions={"👍": 2}, recent_reactions=[mine, alice]),
+        4: make_message("my reply", id=4, date=now, sender=ME, reactions={"❤️": 2, "🔥": 1}),
+        5: make_message("older", id=5, date=now, sender=ME, reactions={"👍": 3}),
+    }
+    start = time.time()
+    await pipeline.poll_once(now=start + 61)
+    await asyncio.sleep(0.05)
+    assert host.maisaka.context.lines == [("s-group", "[表情回应] Alice回应了Alice的消息「orig」: 👍")]
+    notices = host.routed[routed:]
+    assert [m["processed_plain_text"] for m in notices] == ["有人回应了你的消息「my reply」: ❤️×2 🔥"]
+    assert notices[0]["is_notify"] is True
+
+    await pipeline.on_reaction(ReactionChange(GROUP.id, 4, "🎉", actor=ALICE))  # live (bot admin): reported now
+    pipeline.backend.polled[4] = make_message("my reply", id=4, date=now, sender=ME, reactions={"❤️": 2, "🔥": 1, "🎉": 1})
+    await pipeline.poll_once(now=start + 181)  # ... and not again by polling
+    await asyncio.sleep(0.05)
+    assert [m["processed_plain_text"] for m in host.routed[routed + 1:]] == ["Alice回应了你的消息「my reply」: 🎉"]
+    assert len(host.maisaka.context.lines) == 1
     await pipeline.close()
     await store.close()
 

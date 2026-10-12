@@ -71,6 +71,10 @@ _MIGRATIONS: list[str] = [
     """
     ALTER TABLE msg_meta ADD COLUMN topic_id INTEGER;
     """,
+    """
+    -- Reaction counts per emoji (JSON) last seen, for history polling; NULL for older rows.
+    ALTER TABLE msg_meta ADD COLUMN reactions TEXT;
+    """,
 ]
 
 MEDIA_COLUMNS = (
@@ -148,15 +152,16 @@ class Store:
         date: float | None = None,
         topic_id: int | None = None,
         text: str | None = None,
+        reactions: dict[str, int] | None = None,
     ) -> None:
         await self.execute(
-            "INSERT INTO msg_meta (chat_id, msg_id, sender_id, sender_is_bot, is_outgoing, routed, date, topic_id, text) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id, msg_id) DO UPDATE SET "
+            "INSERT INTO msg_meta (chat_id, msg_id, sender_id, sender_is_bot, is_outgoing, routed, date, topic_id, text, "
+            "reactions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chat_id, msg_id) DO UPDATE SET "
             "sender_id = excluded.sender_id, sender_is_bot = excluded.sender_is_bot, "
             "is_outgoing = excluded.is_outgoing, routed = max(routed, excluded.routed), "
             "topic_id = coalesce(excluded.topic_id, topic_id), text = coalesce(excluded.text, text)",
             (chat_id, msg_id, sender_id, int(sender_is_bot), int(is_outgoing), int(routed), int(date or time.time()),
-             topic_id, text),
+             topic_id, text, json.dumps(reactions or {}, ensure_ascii=False)),
         )
 
     async def mark_routed(self, chat_id: int, msg_id: int, sender_name: str | None = None, text: str | None = None) -> None:
@@ -168,6 +173,12 @@ class Store:
 
     async def set_snapshot(self, chat_id: int, msg_id: int, text: str) -> None:
         await self.execute("UPDATE msg_meta SET text = ? WHERE chat_id = ? AND msg_id = ?", (text, chat_id, msg_id))
+
+    async def set_reactions(self, chat_id: int, msg_id: int, reactions: dict[str, int]) -> None:
+        await self.execute(
+            "UPDATE msg_meta SET reactions = ? WHERE chat_id = ? AND msg_id = ?",
+            (json.dumps(reactions, ensure_ascii=False), chat_id, msg_id),
+        )
 
     async def forget_message(self, chat_id: int, msg_id: int) -> None:
         await self.execute("DELETE FROM msg_meta WHERE chat_id = ? AND msg_id = ?", (chat_id, msg_id))
@@ -200,6 +211,11 @@ class Store:
                 pairs.append((msg_id, date))
         return result
 
+    async def chat_message_ids(self, chat_id: int) -> list[int]:
+        """Ids of the messages known in a chat, newest first."""
+        rows = await self.fetchall("SELECT msg_id FROM msg_meta WHERE chat_id = ? ORDER BY msg_id DESC", (chat_id,))
+        return [row[0] for row in rows]
+
     async def is_known_to_core(self, chat_id: int, msg_id: int, max_age_seconds: int = 3600) -> bool:
         """Whether MaiBot has this message in its recent context (routed or sent by it, and recent)."""
         row = await self.fetchone(
@@ -210,7 +226,8 @@ class Store:
 
     async def get_message_meta(self, chat_id: int, msg_id: int) -> dict[str, Any] | None:
         row = await self.fetchone(
-            "SELECT sender_id, sender_is_bot, is_outgoing, date, routed, sender_name, text, topic_id FROM msg_meta "
+            "SELECT sender_id, sender_is_bot, is_outgoing, date, routed, sender_name, text, topic_id, reactions "
+            "FROM msg_meta "
             "WHERE chat_id = ? AND msg_id = ?",
             (chat_id, msg_id),
         )
@@ -219,6 +236,7 @@ class Store:
         return {
             "sender_id": row[0], "sender_is_bot": bool(row[1]), "is_outgoing": bool(row[2]), "date": row[3],
             "routed": bool(row[4]), "sender_name": row[5], "text": row[6], "topic_id": row[7],
+            "reactions": None if row[8] is None else json.loads(row[8]),
         }
 
     async def prune_messages(self, older_than_seconds: int) -> int:

@@ -4,25 +4,29 @@
 [MaiBot](https://github.com/Mai-with-u/MaiBot)
 [Telegram](https://telegram.org) 全功能适配器。
 
-同时支持 Bot 与用户账号 (userbot)。
+本适配器支持 Bot 与用户账号 (userbot)。
+相较于已存在的 Telegram 插件，本适配器面向重度用户，并不以轻量为设计目标，依赖全功能
+Telethon 运行库，且基于 Telegram 使用 MP4 处理动图的机制，依赖
+[PyAV](https://github.com/pyav-org/pyav) 媒体处理库。在内存等资源足够的情况下，通过
+[cryptg](https://github.com/cher-nov/cryptg) 库的加速，可以取得比 HTTP Bot API 显著提高的性能体验。
 
 ## 功能
 
 | 类别 | 内容 |
 |---|---|
 | 账号 | 支持 Bot 与用户账号 (userbot) |
-| 连接 | 断线自动重连，原声支持代理 |
-| 消息 | 支持 markdown 格式，LaTeX 公式自动转为纯文本；回复、@、转发来源、频道与匿名管理员身份、论坛话题 |
-| 媒体 | 图片、贴纸、语音、文件；复用已有识别结果；来自 Telegram 的按原文件发送；GIF 转码供识别；链接预览 |
-| 投递节奏 | 编辑合并后通知、删除通知、等待输入、静默窗口、积攒推送、Bot 历史轮询 |
-| 过滤 | 其他 Bot 的消息、发给其他 Bot 的命令 |
-| 互动 | 生成回复时显示正在输入；表情回应；按钮 |
-| 长文 | 提示使用长文工具；发布到 Telegra.ph；Telegram AI 摘要（Bot 需开启用户账号辅助） |
+| 连接 | 断线自动重连，原生支持代理 |
+| 消息 | 支持 markdown 格式；回复、@、转发来源、频道与匿名管理员身份、论坛话题 |
+| 媒体 | 图片、贴纸、语音、文件；复用已有识别结果；来自 Telegram 的按原文件发送；GIF 转码；链接预览 |
+| 投递节奏 | 编辑、删除通知，等待输入，静默窗口，积攒推送，历史轮询 |
+| 过滤 | 其他 Bot，发给其他 Bot 的命令 |
+| 互动 | 显示正在输入；表情回应；按钮消息 |
+| 长文 | 发布到 Telegra.ph；Telegram AI 摘要 |
 | 高级 | 调用 MTProto 方法 |
 
 ## 安装
 
-通过审批后可在 MaiBot 插件市场直接下载。
+在 [MaiBot 插件市场](https://plugins.maibot.chat) 搜索 **`Telegram Full`** 安装。
 
 手动安装：
 
@@ -31,17 +35,14 @@ cd /path/to/MaiBot/plugins
 git clone https://github.com/KumaTea/MaiBot-Telegram-Full.git kumatea_telegram-full
 ```
 
-`cryptg` 与 `av`（PyAV，用于 GIF 转码，自带 ffmpeg）为必需依赖。未提供预编译的平台可能安装失败。
-
-链接预览与 Telegram 用户看到的一致：发送者关闭预览就不读取（`media.link_preview_always` 可改为总是读取），Telegram 预览的图片一并交给 MaiBot 识别（`media.link_preview_image`）。默认不读取本机、局域网等非公网地址（`media.link_allow_private` 可放开）。
-fake-ip 代理（Clash / mihomo / sing-box）分配的 198.18.0.0/15 地址不受影响，无需额外配置。
+`cryptg` 与 `av` (PyAV 用于 GIF 转码) 为必需依赖，未提供预编译的平台可能安装失败。
 
 ## 快速开始
 
 1. 在 <https://my.telegram.org> 申请 API ID / API Hash。Bot 账号也必须提供。
 2. 在 WebUI 的插件配置填写 `account` 部分：
    - Bot 账号：`type = "bot"`，填写 `bot_token`。
-     在群里接收全部消息需要向 BotFather 发送 `/setprivacy` 关闭隐私模式，或把 Bot 设为管理员（接收表情回应必须是管理员）
+     在群里接收全部消息需要向 BotFather 发送 `/setprivacy` 关闭隐私模式，或把 Bot 设为管理员（管理员才能即时收到表情回应，否则由历史轮询稍后发现）
      可选：打开 `user_helper` 并按下一条填写用户账号，Bot 就能使用长文 AI 摘要和 Telegram 链接预览这两项 Bot 无法调用的功能。
      该用户账号只做这两项（摘要会在它自己的收藏夹里临时发一条并立即删除），不在任何聊天收发消息，也不读取它的聊天；登录失败不影响 Bot。
    - 用户账号：`type = "user"`，填写 `phone`；若启用两步验证则填写 `password`。

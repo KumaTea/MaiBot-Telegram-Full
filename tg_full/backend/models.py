@@ -49,6 +49,7 @@ class WebPage:
     title: str | None = None
     description: str | None = None
     has_photo: bool = False
+    summary: str | None = None  # Telegram's AI summary atop the page's Instant View
     raw: Any = field(default=None, repr=False, compare=False)  # the TL page, to download its photo
 
 
@@ -94,6 +95,16 @@ class ReactionChange:
 
 
 @dataclass(frozen=True)
+class RecentReaction:
+    """One of the latest reactions on a message, when Telegram lists who reacted."""
+
+    emoji: str
+    peer_id: int
+    big: bool = False
+    mine: bool = False  # sent by this account
+
+
+@dataclass(frozen=True)
 class CallbackPress:
     """A user pressed an inline keyboard button of one of our messages (bot accounts only)."""
 
@@ -128,4 +139,6 @@ class Message:
     grouped_id: int | None = None
     mentioned: bool = False
     post_author: str | None = None
+    reactions: dict[str, int] = field(default_factory=dict)  # count per emoji, this account's included
+    recent_reactions: list[RecentReaction] = field(default_factory=list)  # newest first
     raw: Any = field(default=None, repr=False, compare=False)

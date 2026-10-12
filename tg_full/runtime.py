@@ -18,7 +18,7 @@ from .backend.models import CallbackPress, Message, Peer, ReactionChange
 from .backend.raw_api import RawApiError, build_request, result_to_json
 from .config import TelegramFullConfig
 from .constants import GATEWAY_NAME, PLATFORM, PROTOCOL, STORE_FILENAME, VERSION
-from .ids import ChatTarget, decode_message_id, encode_message_id
+from .ids import ChatTarget, decode_message_id, encode_message_id, find_aliased_message, is_message_alias
 from .inbound.codec import InboundCodec, sender_identity
 from .inbound.pipeline import InboundPipeline
 from .media.cache import MediaCache
@@ -42,6 +42,8 @@ from .text.md_out import render
 _INITIAL_RETRY_DELAY = 5
 _MAX_BUTTON_DATA_BYTES = 64  # Telegram's limit for callback data
 _MESSAGE_META_RETENTION = 7 * 24 * 3600
+_ALIAS_SEARCH_DEPTH = 200_000  # earlier ids hashed to find an aliased message we never saw (~1 s)
+_ALIAS_SEARCH_AHEAD = 1000  # and newer ones, in case we missed the latest messages
 
 
 class ActionError(RuntimeError):
@@ -349,6 +351,35 @@ class AdapterRuntime:
             raise ActionError("This chat is not a Telegram chat of this adapter")
         return target
 
+    async def _message_in(self, target: ChatTarget, msg_id: str) -> int:
+        """The Telegram id of ``msg_id`` (``<chat>:<id>``, a bare id or a Maisaka alias) in the target chat."""
+        decoded = decode_message_id(msg_id, default_chat_id=target.chat_id)
+        if decoded is None and is_message_alias(msg_id):
+            found = await self._resolve_alias(target.chat_id, msg_id.strip())
+            if found is None:
+                raise ActionError(f"msg_id {msg_id!r} matches no message of this chat")
+            return found
+        if decoded is None or decoded[0] != target.chat_id:
+            raise ActionError(f"msg_id {msg_id!r} is not a message of this chat")
+        return decoded[1]
+
+    async def _resolve_alias(self, chat_id: int, alias: str) -> int | None:
+        """Map a Maisaka alias back: messages we know first, then the chat's earlier ids.
+
+        Telegram numbers a chat's messages in sequence, so hashing the ids below the newest one
+        also finds messages we never saw, such as old ones a reply quotes.
+        """
+        assert self.store is not None
+        known = await self.store.chat_message_ids(chat_id)
+        found = find_aliased_message(alias, chat_id, known)
+        if found is None and known:
+            newest = known[0] + _ALIAS_SEARCH_AHEAD
+            candidates = range(newest, max(newest - _ALIAS_SEARCH_DEPTH, 0), -1)
+            found = await asyncio.to_thread(find_aliased_message, alias, chat_id, candidates)
+        if found is not None:
+            self.logger.debug("Message alias %s is %s:%s", alias, chat_id, found)
+        return found
+
     async def on_reply_started(self, session_id: str, attempt: int) -> None:
         """MaiBot started generating a reply: show "typing…" once (R19)."""
         if attempt != 1 or not self.config().outbound.typing_indicator or self.streams is None:
@@ -361,13 +392,11 @@ class AdapterRuntime:
                 self.logger.debug("Typing status failed in %s: %r", target.chat_id, exc)
 
     async def react(self, stream_id: str, msg_id: str, emoji: str, big: bool = False) -> dict[str, Any]:
-        backend, _, _ = self._online()
+        backend, _, pipeline = self._online()
         target = await self._target(stream_id)
-        decoded = decode_message_id(msg_id, default_chat_id=target.chat_id)
-        if decoded is None or decoded[0] != target.chat_id:
-            raise ActionError(f"msg_id {msg_id!r} is not a message of this chat")
+        message_id = await self._message_in(target, msg_id)
         try:
-            await backend.send_reaction(target.chat_id, decoded[1], emoji.strip(), big)
+            await backend.send_reaction(target.chat_id, message_id, emoji.strip(), big)
         except Exception as exc:
             if "REACTION_INVALID" in str(exc) or "REACTIONS_TOO_MANY" in str(exc):
                 raise ActionError(
@@ -375,6 +404,8 @@ class AdapterRuntime:
                     "reaction such as 👍 ❤️ 🔥 😁 🤔 😢 🎉 🙏 👌 😭 or 🤣"
                 ) from exc
             raise ActionError(str(exc)) from exc
+        if emoji.strip():
+            await pipeline.own_reaction(target.chat_id, message_id, emoji.strip())
         return {"success": True, "content": f"已给消息 {msg_id} 添加表情回应 {emoji}" if emoji else "已取消表情回应"}
 
     async def send_buttons(
@@ -451,10 +482,7 @@ class AdapterRuntime:
         backend, _, _ = self._online()
         assert self.inbound is not None
         target = await self._target(stream_id)
-        decoded = decode_message_id(msg_id, default_chat_id=target.chat_id)
-        if decoded is None or decoded[0] != target.chat_id:
-            raise ActionError(f"msg_id {msg_id!r} is not a message of this chat")
-        message = (await backend.get_messages(target.chat_id, [decoded[1]]))[0]
+        message = (await backend.get_messages(target.chat_id, [await self._message_in(target, msg_id)]))[0]
         if message is None:
             raise ActionError(f"Message {msg_id} does not exist any more or cannot be read")
         _, author = sender_identity(message)

@@ -271,8 +271,9 @@ class InboundSection(PluginConfigBase):
         ),
         json_schema_extra=_ui(
             "表情回应", "Reactions",
-            "Bot 账号需为群管理员才能收到回应；长按大表情仅用户账号可见",
-            "Bots only receive reactions as group admins; long-press big reactions are visible to user accounts only",
+            "Bot 账号只有群管理员能即时收到回应，否则由历史轮询稍后发现；长按大表情仅用户账号可见",
+            "Bots receive reactions live only as group admins, otherwise history polling finds them later; "
+            "long-press big reactions are visible to user accounts only",
             order=5,
         ),
     )
@@ -374,8 +375,9 @@ class DispatchSection(PluginConfigBase):
     history_poll: Literal["auto", "on", "off"] = Field(
         default="auto",
         description=(
-            "定期重读最近消息，发现编辑与删除。auto 仅 Bot 账号开启（Bot 收不到删除通知）。"
-            "轮询发现的变化只更新 MaiBot 的上下文，不会触发回复"
+            "定期重读最近消息，发现编辑、删除与新的表情回应。auto 仅 Bot 账号开启（Bot 收不到删除通知，"
+            "非管理员收不到表情回应）。轮询发现的编辑与删除只更新 MaiBot 的上下文，不会触发回复；"
+            "表情回应按「表情回应」设置处理"
         ),
         json_schema_extra=_ui("历史轮询", "History polling", order=12),
     )

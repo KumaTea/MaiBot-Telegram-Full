@@ -1,3 +1,7 @@
+A copy of messages sent to Claude Code.
+
+---
+
 I want to make a Telethon based MaiBot Adapter.
 Telethon (https://codeberg.org/Lonami/Telethon) is an asyncio Python 3 MTProto library. MaiBot (https://github.com/Mai-with-u/MaiBot), aka MaiSaka, is an LLM-based intelligent agent framework.
 It will be an enhanced version of https://github.com/exynos967/MaiBot-Telegram-Adapter, which includes a hand-written HTTP Telegram bot API library.
@@ -130,3 +134,39 @@ own generated summary like we get a message fits our development philosophy.
 And please print out the test telegraph link to let me check again.
 
 Please note this in the project's CLAUDE.md: you can always re-deploy when you want or finish a version.
+
+---
+
+A small fix I would like:
+With bot account, the bot can only periodically poll (get_messages) to check message updates like edit and deletion. I was expecting this including emoji reactions to the bot's messages but none now. Has this been implemented? (A emoji reaction does not need to dispatch a message event, only a notification event, if this exists, or stack them, in my opinion)
+
+---
+
+I found that in the webui console of MaiBot sometimes the messages ID looks weird. This also causes tool calling errors. For example, get message and reply to message id.
+
+```
+telegram_get_message
+执行失败
+2ms
+正文调用
+msg_id
+=
+mhdi2lw
+JSON
+{
+  "tool_call_id": "call_eefaab861b0cdbb",
+  "tool_name": "telegram_get_message",
+  "tool_args": {
+    "msg_id": "mhdi2lw"
+  },
+  "success": false,
+  "duration_ms": 2.42,
+  "summary": "- telegram_get_message [正文调用] [失败]: msg_id 'mhdi2lw' is not a message of this chat",
+  "tool_call_source": "response",
+  "tool_call_source_label": "正文调用"
+}
+执行结果
+- telegram_get_message [正文调用] [失败]: msg_id 'mhdi2lw' is not a message of this chat
+```
+
+Please check if this non digit msg_id is encrypted by MaiBot, and can we decrypt it back for our use.

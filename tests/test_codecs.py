@@ -5,7 +5,15 @@ from conftest import ALICE, GROUP, ME, OTHER_BOT, make_message
 
 from tg_full.backend.models import Forward, Media, Peer
 from tg_full.config import InboundSection, OutboundSection
-from tg_full.ids import ChatTarget, decode_group_id, decode_message_id, encode_group_id, encode_message_id
+from tg_full.ids import (
+    ChatTarget,
+    decode_group_id,
+    decode_message_id,
+    encode_group_id,
+    encode_message_id,
+    is_message_alias,
+    message_alias,
+)
 from tg_full.inbound.codec import InboundCodec, sender_identity
 from tg_full.inbound.filters import drop_reason
 from tg_full.outbound.codec import OutboundError, build_plan
@@ -27,6 +35,38 @@ def test_message_id_roundtrip():
 
 
 # ---- filters -----------------------------------------------------------------------------
+
+
+def test_message_alias_matches_maisaka():
+    # Values from MaiBot's own to_display_message_id.
+    assert message_alias("-1001932978232:132107") == "mhdi2lw"
+    assert message_alias("-1001932978232:131996") == "mpfg2cn"
+    assert message_alias("12345:678") == "12345:678"  # 12 characters or fewer are shown as they are
+    assert is_message_alias(" mhdi2lw ") and not is_message_alias("m1234567") and not is_message_alias("132107")
+
+
+async def test_tools_map_maisaka_aliases_back(tmp_path):
+    import logging
+
+    from tg_full.config import TelegramFullConfig
+    from tg_full.runtime import ActionError, AdapterRuntime
+    from tg_full.store import Store
+
+    runtime = AdapterRuntime(None, TelegramFullConfig, logging.getLogger("t"))
+    runtime.store = Store(tmp_path / "s.sqlite3")
+    await runtime.store.open()
+    chat = ChatTarget(-1001932978232)
+    for msg_id in (132107, 132125):
+        await runtime.store.record_message(chat.chat_id, msg_id, ALICE.id, False, is_outgoing=False, routed=True)
+    assert await runtime._message_in(chat, "-1001932978232:5") == 5
+    assert await runtime._message_in(chat, "7") == 7
+    assert await runtime._message_in(chat, "mhdi2lw") == 132107  # known to us
+    assert await runtime._message_in(chat, "mgspb2p") == 99276  # an old message a reply quoted
+    with pytest.raises(ActionError, match="matches no message"):
+        await runtime._message_in(chat, "maaaaaa")
+    with pytest.raises(ActionError, match="not a message of this chat"):
+        await runtime._message_in(chat, "-100123:5")
+    await runtime.store.close()
 
 
 def test_filters():

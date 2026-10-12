@@ -24,6 +24,7 @@ from .convert import (
     page_summary,
     peer_from_entity,
     preview_photo_size,
+    reaction_text,
     webpage_from_tl,
 )
 from .models import CallbackPress, MediaRef, Message, Peer, ReactionChange, WebPage
@@ -56,16 +57,6 @@ def inline_markup(rows: Sequence[Sequence[dict[str, str]]]) -> types.ReplyInline
         ])
         for row in rows
     ])
-
-
-def _reaction_text(reaction: Any) -> str:
-    if isinstance(reaction, types.ReactionEmoji):
-        return reaction.emoticon
-    if isinstance(reaction, types.ReactionCustomEmoji):
-        return "[自定义表情]"
-    if isinstance(reaction, types.ReactionPaid):
-        return "⭐"
-    return "[表情]"
 
 
 class _Client(TelegramClient):
@@ -329,11 +320,11 @@ class TelegramBackend:
         async def handler(update: Any) -> None:
             if isinstance(update, types.UpdateBotMessageReaction):
                 chat_id = utils.get_peer_id(update.peer)
-                old = {_reaction_text(r) for r in update.old_reactions}
+                old = {reaction_text(r) for r in update.old_reactions}
                 actor = peer_from_entity(await self._entity_or_none(update.actor))
                 for reaction in update.new_reactions:
-                    if _reaction_text(reaction) not in old:
-                        await emit(ReactionChange(chat_id, update.msg_id, _reaction_text(reaction), actor))
+                    if reaction_text(reaction) not in old:
+                        await emit(ReactionChange(chat_id, update.msg_id, reaction_text(reaction), actor))
                 return
             if not isinstance(update, types.UpdateMessageReactions):
                 return
@@ -347,7 +338,7 @@ class TelegramBackend:
                 known = seen.setdefault(key, set())
                 cutoff = time.time() - _RECENT_REACTION_SECONDS
                 for entry in recent:
-                    marker = (utils.get_peer_id(entry.peer_id), _reaction_text(entry.reaction), entry.date)
+                    marker = (utils.get_peer_id(entry.peer_id), reaction_text(entry.reaction), entry.date)
                     if entry.my or marker in known or entry.date.timestamp() < cutoff:
                         known.add(marker)
                         continue
@@ -355,7 +346,7 @@ class TelegramBackend:
                     actor = peer_from_entity(await self._entity_or_none(entry.peer_id))
                     await emit(ReactionChange(chat_id, update.msg_id, marker[1], actor, bool(entry.big)))
                 return
-            current = {_reaction_text(r.reaction): r.count for r in update.reactions.results}
+            current = {reaction_text(r.reaction): r.count for r in update.reactions.results}
             previous = counts.get(key, {})
             counts[key] = current
             for emoji, count in current.items():

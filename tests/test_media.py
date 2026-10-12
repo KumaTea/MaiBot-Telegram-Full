@@ -436,3 +436,18 @@ async def test_native_resend_of_known_sticker(store):
                       OutboundSection())
     assert plan.items[0].source_hash == "other"
     assert plan.target == ChatTarget(GROUP.id)
+
+
+async def test_telegrams_ai_summary_stands_for_the_description(store):
+    page = WebPage("u", site_name="Telegraph", title="长文", description="正文开头……", summary="全文的 AI 摘要")
+    fetched = LinkInfo("u", title="长文", description="正文开头，比摘要更长的一段网页简介文字")
+    info = await previewer_with(store, FakeUserAccount(page), fetched).describe("https://telegra.ph/x")
+    assert info.description == "全文的 AI 摘要" and info.ai_summary  # wins although shorter
+    message = make_message("https://telegra.ph/x", entities=[Entity("url", 0, 20)], link_preview=True)
+    codec, _ = codec_for(store, FakeDb(), links=previewer_with(store, FakeUserAccount(page), fetched))
+    payload = await codec.build(message)  # cached from above
+    assert payload["raw_message"][-1]["data"] == "\n[链接预览: Telegraph | 长文 — AI 摘要：全文的 AI 摘要]"
+
+    # A user account's own message carries the page, summary included.
+    payload = await codec.build(make_message("https://telegra.ph/y", webpage=page, link_preview=True))
+    assert payload["raw_message"][-1]["data"].endswith("AI 摘要：全文的 AI 摘要]")

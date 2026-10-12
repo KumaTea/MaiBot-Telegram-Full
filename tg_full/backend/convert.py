@@ -9,7 +9,7 @@ from telethon import TelegramClient, utils
 from telethon.tl import types
 
 from ..text.entities import Entity, utf16_len
-from .models import Forward, Media, MediaRef, Message, Peer, WebPage
+from .models import Forward, Media, MediaRef, Message, Peer, RecentReaction, WebPage
 
 logger = logging.getLogger(__name__)
 
@@ -183,9 +183,10 @@ def webpage_from_message(msg: Any) -> WebPage | None:
 def webpage_from_tl(page: Any) -> WebPage | None:
     if not isinstance(page, types.WebPage):
         return None
+    summary = page_summary(page)
     return WebPage(
         url=page.url, site_name=page.site_name, title=page.title, description=page.description,
-        has_photo=isinstance(page.photo, types.Photo), raw=page,
+        has_photo=isinstance(page.photo, types.Photo), summary=summary[0] if summary else None, raw=page,
     )
 
 
@@ -280,6 +281,33 @@ def topic_of(msg: Any, chat: Peer) -> tuple[int | None, int | None]:
     return None, reply_id
 
 
+def reaction_text(reaction: Any) -> str:
+    if isinstance(reaction, types.ReactionEmoji):
+        return reaction.emoticon
+    if isinstance(reaction, types.ReactionCustomEmoji):
+        return "[自定义表情]"
+    if isinstance(reaction, types.ReactionPaid):
+        return "⭐"
+    return "[表情]"
+
+
+def reactions_from_message(msg: Any) -> tuple[dict[str, int], list[RecentReaction]]:
+    """Reaction counts per emoji, and the latest reactors when Telegram lists them (newest first)."""
+    reactions = msg.reactions
+    if not isinstance(reactions, types.MessageReactions):
+        return {}, []
+    counts: dict[str, int] = {}
+    for result in reactions.results:
+        emoji = reaction_text(result.reaction)
+        counts[emoji] = counts.get(emoji, 0) + result.count
+    entries = sorted(reactions.recent_reactions or [], key=lambda entry: entry.date, reverse=True)
+    recent = [
+        RecentReaction(reaction_text(entry.reaction), utils.get_peer_id(entry.peer_id), bool(entry.big), bool(entry.my))
+        for entry in entries
+    ]
+    return counts, recent
+
+
 async def message_from_tl(client: TelegramClient, msg: Any, *, resolve_reply: bool = True) -> Message | None:
     if not isinstance(msg, types.Message):
         return None  # MessageService / MessageEmpty
@@ -294,6 +322,7 @@ async def message_from_tl(client: TelegramClient, msg: Any, *, resolve_reply: bo
     reply_to_chat_id = None
     if header is not None and header.reply_to_peer_id is not None:
         reply_to_chat_id = utils.get_peer_id(header.reply_to_peer_id)
+    reactions, recent_reactions = reactions_from_message(msg)
 
     result = Message(
         chat=chat,
@@ -316,6 +345,8 @@ async def message_from_tl(client: TelegramClient, msg: Any, *, resolve_reply: bo
         grouped_id=msg.grouped_id,
         mentioned=bool(msg.mentioned),
         post_author=msg.post_author,
+        reactions=reactions,
+        recent_reactions=recent_reactions,
         raw=msg,
     )
     if resolve_reply and reply_to_id is not None and reply_to_chat_id in (None, chat.id):

@@ -39,7 +39,7 @@ Restart MaiBot; the plugin is recognized as an **adapter**. MaiBot installs the 
 1. Get an **API ID / API hash** at <https://my.telegram.org>. MTProto needs them for bots too.
 2. Fill in the `account` section in the WebUI (or `config.toml` in the plugin folder):
    - **Bot:** `type = "bot"` and `bot_token` from [@BotFather](https://t.me/BotFather). To see all
-     group messages, disable privacy mode (`/setprivacy`) or make the bot an admin (reactions need admin).
+     group messages, disable privacy mode (`/setprivacy`) or make the bot an admin (only admins get reactions live; otherwise history polling finds them later).
      Optional: turn on `user_helper` and fill in a user account as below. The bot can then use the two
      things bots cannot call: AI summaries for long texts and Telegram's own link previews. The helper
      does nothing else (a summary briefly puts a note in its own Saved Messages and deletes it), takes

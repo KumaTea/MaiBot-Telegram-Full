@@ -7,13 +7,22 @@ channels / supergroups ``-100id``.
   (``<chat_id>::tg-topic::mt=<topic_id>``) so existing MaiBot sessions carry over.
 * Message ids are ``<chat_id>:<msg_id>``. MaiBot resolves reply targets by message id across
   all chats, and Telegram message ids are only unique per chat.
+* Maisaka shows the model ids longer than 12 characters (all of ours) as short aliases such as
+  ``mhdi2lw`` and maps them back only for messages in its current chat history. Aliases of
+  other messages (ones it filtered or never saw, quoted by a reply, or ones that left the
+  history) reach our tools unchanged; ``message_alias`` lets us map those back ourselves.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 _TOPIC_SPLITTER = "::tg-topic::"
+_ALIAS = re.compile(r"m[a-z2-7]{6}")
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,23 @@ def decode_group_id(group_id: str) -> ChatTarget:
 
 def encode_message_id(chat_id: int, msg_id: int) -> str:
     return f"{chat_id}:{msg_id}"
+
+
+def message_alias(message_id: str) -> str:
+    """The id Maisaka shows the model (``src/maisaka/context/message_id_alias.py`` in MaiBot)."""
+    if len(message_id) <= 12:
+        return message_id
+    digest = hashlib.sha1(message_id.encode("utf-8")).digest()
+    return "m" + base64.b32encode(digest).decode("ascii").lower()[:6]
+
+
+def is_message_alias(value: str) -> bool:
+    return _ALIAS.fullmatch(value.strip()) is not None
+
+
+def find_aliased_message(alias: str, chat_id: int, msg_ids: Iterable[int]) -> int | None:
+    """The first of ``msg_ids`` in this chat whose Maisaka alias is ``alias``."""
+    return next((m for m in msg_ids if message_alias(encode_message_id(chat_id, m)) == alias), None)
 
 
 def decode_message_id(value: str, default_chat_id: int | None = None) -> tuple[int, int] | None:

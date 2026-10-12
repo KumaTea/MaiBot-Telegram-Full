@@ -21,7 +21,7 @@ from ..constants import PLATFORM
 from ..ids import encode_group_id, encode_message_id
 from ..media import animation
 from ..media.cache import MediaCache
-from ..media.link_preview import LinkInfo, LinkPreviewer
+from ..media.link_preview import LinkInfo, LinkPreviewer, link_info
 from ..text.entities import Entity, units_to_str, utf16_units
 from ..text.md_in import to_markdown
 from .dispatcher import Notice
@@ -169,7 +169,9 @@ def _previewed_link(urls: list[str], preview_url: str | None) -> str | None:
 
 def link_marker(info: LinkInfo) -> str:
     head = " | ".join(x for x in (info.site_name, info.title) if x)
-    body = _truncate(info.description or "", 300)
+    body = _truncate(info.description or "", 500 if info.ai_summary else 300)
+    if body and info.ai_summary:
+        body = f"AI 摘要：{body}"
     return f"\n[链接预览: {head}{' — ' + body if body else ''}]"
 
 
@@ -372,8 +374,8 @@ class InboundCodec:
         if mode == "off" or not (message.link_preview or settings.link_preview_always):
             return []
         page = message.webpage
-        if page is not None and (page.title or page.description):
-            segments = [_text(link_marker(LinkInfo(page.url, page.title, page.description, page.site_name)))]
+        if page is not None and (page.title or page.description or page.summary):
+            segments = [_text(link_marker(link_info(page.url, page)))]
             if settings.link_preview_image and page.has_photo and self.links is not None:
                 segments += self._link_image(await self.links.photo(page.url, page))
             return segments
